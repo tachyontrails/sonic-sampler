@@ -1,0 +1,26 @@
+[project]
+name = "sonic-sampler"
+description = "Unified Tile-Aware Kernels for LLM Sampling and Speculative Verification"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dynamic = ["version"]
+dependencies = [
+    "triton>=3.5.1",
+    "torch",
+    "msgspec",
+    "cytoolz",
+    "tomli_w",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "sonic_sampler.__version__" }
+
+[tool.setuptools.package-data]
+sonic_sampler = ["resources/*.toml"]
+
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+

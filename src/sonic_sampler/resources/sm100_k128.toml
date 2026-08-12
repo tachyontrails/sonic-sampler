@@ -1,0 +1,311 @@
+k = 128
+
+[metadata]
+version = 1
+timestamp = "2026-03-28T00:30:17.621745+00:00"
+
+[[vocab]]
+size = 8192
+
+[[vocab.batch]]
+size = 1
+config = [
+    { priority = 0, block_n = 1024, strategy = "bitonic", first_warps = 4, second_warps = 4 },
+    { priority = 1, block_n = 1024, strategy = "adaptive", first_warps = 8, second_warps = 8 },
+    { priority = 2, block_n = 1024, strategy = "radix", first_warps = 4, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 2
+config = [
+    { priority = 0, block_n = 1024, strategy = "bitonic", first_warps = 4, second_warps = 4 },
+    { priority = 1, block_n = 2048, strategy = "adaptive", first_warps = 8, second_warps = 4 },
+    { priority = 2, block_n = 1024, strategy = "radix", first_warps = 4, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 4
+config = [
+    { priority = 0, block_n = 1024, strategy = "bitonic", first_warps = 4, second_warps = 4 },
+    { priority = 1, block_n = 2048, strategy = "adaptive", first_warps = 8, second_warps = 4 },
+    { priority = 2, block_n = 1024, strategy = "radix", first_warps = 4, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 8
+config = [
+    { priority = 0, block_n = 1024, strategy = "bitonic", first_warps = 4, second_warps = 4 },
+    { priority = 1, block_n = 2048, strategy = "adaptive", first_warps = 8, second_warps = 4 },
+    { priority = 2, block_n = 1024, strategy = "radix", first_warps = 4, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 16
+config = [
+    { priority = 0, block_n = 1024, strategy = "bitonic", first_warps = 4, second_warps = 4 },
+    { priority = 1, block_n = 2048, strategy = "adaptive", first_warps = 8, second_warps = 4 },
+    { priority = 2, block_n = 1024, strategy = "radix", first_warps = 4, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 32
+config = [
+    { priority = 0, block_n = 2048, strategy = "bitonic", first_warps = 8, second_warps = 4 },
+    { priority = 1, block_n = 2048, strategy = "adaptive", first_warps = 8, second_warps = 4 },
+    { priority = 2, block_n = 2048, strategy = "radix", first_warps = 8, second_warps = 4 },
+]
+
+[[vocab]]
+size = 16384
+
+[[vocab.batch]]
+size = 1
+config = [
+    { priority = 0, block_n = 1024, strategy = "bitonic", first_warps = 4, second_warps = 16 },
+    { priority = 1, block_n = 2048, strategy = "adaptive", first_warps = 8, second_warps = 8 },
+    { priority = 2, block_n = 2048, strategy = "radix", first_warps = 8, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 2
+config = [
+    { priority = 0, block_n = 1024, strategy = "bitonic", first_warps = 4, second_warps = 16 },
+    { priority = 1, block_n = 2048, strategy = "adaptive", first_warps = 8, second_warps = 8 },
+    { priority = 2, block_n = 2048, strategy = "radix", first_warps = 8, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 4
+config = [
+    { priority = 0, block_n = 1024, strategy = "bitonic", first_warps = 4, second_warps = 16 },
+    { priority = 1, block_n = 2048, strategy = "adaptive", first_warps = 8, second_warps = 8 },
+    { priority = 2, block_n = 2048, strategy = "radix", first_warps = 8, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 8
+config = [
+    { priority = 0, block_n = 1024, strategy = "bitonic", first_warps = 4, second_warps = 16 },
+    { priority = 1, block_n = 2048, strategy = "adaptive", first_warps = 8, second_warps = 8 },
+    { priority = 2, block_n = 2048, strategy = "radix", first_warps = 8, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 16
+config = [
+    { priority = 0, block_n = 2048, strategy = "bitonic", first_warps = 8, second_warps = 4 },
+    { priority = 1, block_n = 2048, strategy = "adaptive", first_warps = 8, second_warps = 8 },
+    { priority = 2, block_n = 2048, strategy = "radix", first_warps = 8, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 32
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 4 },
+    { priority = 1, block_n = 4096, strategy = "adaptive", first_warps = 16, second_warps = 4 },
+    { priority = 2, block_n = 4096, strategy = "radix", first_warps = 8, second_warps = 4 },
+]
+
+[[vocab]]
+size = 32768
+
+[[vocab.batch]]
+size = 1
+config = [
+    { priority = 0, block_n = 2048, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 4096, strategy = "adaptive", first_warps = 16, second_warps = 8 },
+    { priority = 2, block_n = 2048, strategy = "radix", first_warps = 8, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 2
+config = [
+    { priority = 0, block_n = 2048, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 4096, strategy = "adaptive", first_warps = 16, second_warps = 8 },
+    { priority = 2, block_n = 2048, strategy = "radix", first_warps = 8, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 4
+config = [
+    { priority = 0, block_n = 2048, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 4096, strategy = "adaptive", first_warps = 16, second_warps = 8 },
+    { priority = 2, block_n = 2048, strategy = "radix", first_warps = 8, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 8
+config = [
+    { priority = 0, block_n = 2048, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 4096, strategy = "adaptive", first_warps = 16, second_warps = 8 },
+    { priority = 2, block_n = 2048, strategy = "radix", first_warps = 8, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 16
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 4 },
+    { priority = 1, block_n = 4096, strategy = "adaptive", first_warps = 16, second_warps = 8 },
+    { priority = 2, block_n = 4096, strategy = "radix", first_warps = 8, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 32
+config = [
+    { priority = 0, block_n = 8192, strategy = "adaptive", first_warps = 8, second_warps = 4 },
+    { priority = 1, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 4 },
+    { priority = 2, block_n = 8192, strategy = "radix", first_warps = 8, second_warps = 4 },
+]
+
+[[vocab]]
+size = 65536
+
+[[vocab.batch]]
+size = 1
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 4096, strategy = "adaptive", first_warps = 16, second_warps = 16 },
+    { priority = 2, block_n = 4096, strategy = "radix", first_warps = 8, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 2
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 4096, strategy = "adaptive", first_warps = 16, second_warps = 16 },
+    { priority = 2, block_n = 4096, strategy = "radix", first_warps = 8, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 4
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 4096, strategy = "adaptive", first_warps = 16, second_warps = 16 },
+    { priority = 2, block_n = 4096, strategy = "radix", first_warps = 8, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 8
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 4096, strategy = "adaptive", first_warps = 16, second_warps = 16 },
+    { priority = 2, block_n = 4096, strategy = "radix", first_warps = 8, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 16
+config = [
+    { priority = 0, block_n = 8192, strategy = "adaptive", first_warps = 8, second_warps = 8 },
+    { priority = 1, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 2, block_n = 8192, strategy = "radix", first_warps = 8, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 32
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 16384, strategy = "adaptive", first_warps = 16, second_warps = 4 },
+    { priority = 2, block_n = 16384, strategy = "radix", first_warps = 16, second_warps = 4 },
+]
+
+[[vocab]]
+size = 131072
+
+[[vocab.batch]]
+size = 1
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 8192, strategy = "adaptive", first_warps = 8, second_warps = 16 },
+    { priority = 2, block_n = 4096, strategy = "radix", first_warps = 8, second_warps = 32 },
+]
+
+[[vocab.batch]]
+size = 2
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 8192, strategy = "adaptive", first_warps = 8, second_warps = 16 },
+    { priority = 2, block_n = 4096, strategy = "radix", first_warps = 8, second_warps = 32 },
+]
+
+[[vocab.batch]]
+size = 4
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 8192, strategy = "adaptive", first_warps = 8, second_warps = 16 },
+    { priority = 2, block_n = 4096, strategy = "radix", first_warps = 8, second_warps = 32 },
+]
+
+[[vocab.batch]]
+size = 8
+config = [
+    { priority = 0, block_n = 8192, strategy = "adaptive", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 8192, strategy = "bitonic", first_warps = 16, second_warps = 16 },
+    { priority = 2, block_n = 8192, strategy = "radix", first_warps = 8, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 16
+config = [
+    { priority = 0, block_n = 16384, strategy = "adaptive", first_warps = 16, second_warps = 8 },
+    { priority = 1, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 2, block_n = 16384, strategy = "radix", first_warps = 16, second_warps = 8 },
+]
+
+[[vocab.batch]]
+size = 32
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 16 },
+    { priority = 1, block_n = 16384, strategy = "adaptive", first_warps = 16, second_warps = 8 },
+    { priority = 2, block_n = 16384, strategy = "radix", first_warps = 16, second_warps = 8 },
+]
+
+[[vocab]]
+size = 262144
+
+[[vocab.batch]]
+size = 1
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 32 },
+    { priority = 1, block_n = 8192, strategy = "adaptive", first_warps = 8, second_warps = 32 },
+    { priority = 2, block_n = 8192, strategy = "radix", first_warps = 8, second_warps = 32 },
+]
+
+[[vocab.batch]]
+size = 2
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 32 },
+    { priority = 1, block_n = 8192, strategy = "adaptive", first_warps = 8, second_warps = 32 },
+    { priority = 2, block_n = 8192, strategy = "radix", first_warps = 8, second_warps = 32 },
+]
+
+[[vocab.batch]]
+size = 4
+config = [
+    { priority = 0, block_n = 8192, strategy = "bitonic", first_warps = 16, second_warps = 16 },
+    { priority = 1, block_n = 8192, strategy = "adaptive", first_warps = 8, second_warps = 32 },
+    { priority = 2, block_n = 8192, strategy = "radix", first_warps = 8, second_warps = 32 },
+]
+
+[[vocab.batch]]
+size = 8
+config = [
+    { priority = 0, block_n = 16384, strategy = "adaptive", first_warps = 16, second_warps = 16 },
+    { priority = 1, block_n = 16384, strategy = "bitonic", first_warps = 32, second_warps = 16 },
+    { priority = 2, block_n = 16384, strategy = "radix", first_warps = 16, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 16
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 32 },
+    { priority = 1, block_n = 16384, strategy = "adaptive", first_warps = 16, second_warps = 16 },
+    { priority = 2, block_n = 16384, strategy = "radix", first_warps = 16, second_warps = 16 },
+]
+
+[[vocab.batch]]
+size = 32
+config = [
+    { priority = 0, block_n = 4096, strategy = "bitonic", first_warps = 8, second_warps = 32 },
+    { priority = 1, block_n = 8192, strategy = "adaptive", first_warps = 8, second_warps = 32 },
+    { priority = 2, block_n = 16384, strategy = "radix", first_warps = 16, second_warps = 16 },
+]
