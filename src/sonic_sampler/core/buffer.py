@@ -36,7 +36,7 @@ from sonic_sampler.base import (
 )
 from sonic_sampler.core.flags import Flags, Indicator, ScopedIndicators
 from sonic_sampler.ops.base import MAX_K
-from sonic_sampler.ops.copy import indexed_copy
+from sonic_sampler.ops.copy import indexed_copy, warmup_indexed_copy
 
 
 __all__ = ["SamplingBuffers"]
@@ -67,6 +67,10 @@ class GumbelNoise(SliceBuffer):
         layout = Layout(size, timesteps)
 
         target, draft = PrefixContiguousTensor(torch.empty(shape, dtype=BF16))
+
+        # Ensure `indexed_copy` kernel is warmed-up on initialization for `stage_weights`.
+
+        warmup_indexed_copy(draft, target)
 
         return cls(target=target, draft=draft, layout=layout)
 
