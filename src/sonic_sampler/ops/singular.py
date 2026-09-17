@@ -332,7 +332,7 @@ def cumulative_selection_kernel(
 
                 tl.store(w_ptr + (row_id * stride_w), log_score)
 
-                if (indicator & 0x400) > 0:
+                if block_q and (indicator & 0x400) > 0:
 
                     logprobs_ids = tl.arange(0, block_q)
                     logprobs_mask = logprobs_ids < tl.load(r_ptr + batch_id)

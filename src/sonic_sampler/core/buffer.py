@@ -32,7 +32,7 @@ from sonic_sampler.base import (
     Layout,
     PrefixContiguousTensor,
     SliceBuffer,
-    MAX_TOP_LP,
+    DEFAULT_TOP_LOGPROBS,
 )
 from sonic_sampler.core.flags import Flags, Indicator, ScopedIndicators
 from sonic_sampler.ops.base import MAX_K
@@ -207,7 +207,7 @@ class StochasticWeights(SliceBuffer):
 
         return (
             cls.empty(size, timesteps, vocab_size)
-            .update(generator=generator)
+            .update(generator=generator, prefill=True)
         )
 
     @classmethod
@@ -773,6 +773,23 @@ class PinnedRelay(SliceBuffer):
         return self.update_bias(biases, positions) if any(biases) else self
 
 
+def ensure_top_logprobs[T: Indicator | List[Indicator] | None](indicators: T, maximum: int) -> T:
+
+    if indicators and not maximum:
+
+        if isinstance(indicators, list):
+
+            return [j.disable(Indicator.TOP_K_LOGPROBS) for j in indicators]
+
+        else:
+
+            return indicators.disable(Indicator.TOP_K_LOGPROBS)
+
+    else:
+
+        return indicators
+
+
 class SamplingBuffers(SliceBuffer):
 
     # The grammar bitpacked masking tensor.
@@ -818,6 +835,7 @@ class SamplingBuffers(SliceBuffer):
         device: torch.device | None = None,
         seed: int | None = None,
         bounded: bool = True,
+        max_top_logprobs: int = DEFAULT_TOP_LOGPROBS,
     ) -> SamplingBuffers:
         """
         Note(s):
@@ -827,11 +845,13 @@ class SamplingBuffers(SliceBuffer):
 
         """
         target_device = device or torch.device(f'cuda:{torch.cuda.current_device()}')
+
         generator = initialize_generator(seed, target_device)
+        resolved_indicators = ensure_top_logprobs(indicators, max_top_logprobs)
 
         with torch.device(target_device):
 
-            flags = Flags.resolve(size, timesteps, target=indicators, random=True)
+            flags = Flags.resolve(size, timesteps, target=resolved_indicators, random=True)
             layout = Layout(size, timesteps)
 
             repetition = RepetitionPenalties.random(
@@ -863,9 +883,10 @@ class SamplingBuffers(SliceBuffer):
             )
 
             upper = MAX_K if bounded else vocab_size
+            randint_kwargs = dict(size=(size,), dtype=I32, generator=generator)
 
             top_k = (
-                torch.randint(low=2, high=upper, size=(size,), dtype=I32, generator=generator)
+                torch.randint(low=2, high=upper, **randint_kwargs)
                 .masked_fill_(flags.selectors(Indicator.GREEDY), 1)
                 .masked_fill_(~flags.selectors(Indicator.TOP_K), upper)
             )
@@ -895,10 +916,16 @@ class SamplingBuffers(SliceBuffer):
                 .masked_fill_(~flags.selectors(Indicator.MIN_P), 1)
             )
 
-            top_logprobs = (
-                torch.randint(low=1, high=MAX_TOP_LP, size=(size,), dtype=I32, generator=generator)
-                .masked_fill_(~flags.selectors(Indicator.TOP_K_LOGPROBS), 0)
-            )
+            if max_top_logprobs > 0:
+
+                top_logprobs = (
+                    torch.randint(low=1, high=max_top_logprobs + 1, **randint_kwargs)
+                    .masked_fill_(~flags.selectors(Indicator.TOP_K_LOGPROBS), 0)
+                )
+
+            else:
+
+                top_logprobs = torch.zeros((size,), dtype=I32)
 
             pinned = PinnedRelay.default(size, timesteps, vocab_size)
 

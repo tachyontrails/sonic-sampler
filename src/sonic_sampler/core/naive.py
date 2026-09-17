@@ -31,7 +31,7 @@ from sonic_sampler.base import (
     Verification,
     LogProbabilities,
     TopTargets,
-    MAX_TOP_LP,
+    DEFAULT_TOP_LOGPROBS,
 )
 from sonic_sampler.core import Indicator, SamplingBuffers
 from sonic_sampler.ops import MAX_K
@@ -104,6 +104,9 @@ class NaiveSampler(Struct):
     # Flag enabling bounded top-k.
     bounded: bool = True
 
+    # The static maxima for top-k log-probabilities.
+    max_top_logprobs: int = DEFAULT_TOP_LOGPROBS
+
     def is_enabled(self, flag: Indicator) -> bool:
 
         return any((flag & value) for value in self.buffers.indicators.target)
@@ -119,6 +122,11 @@ class NaiveSampler(Struct):
         ordering = Indicator.cumulative()
 
         return any((value & ordering) for value in self.buffers.indicators.target)
+
+    @property
+    def return_top_logprobs(self) -> bool:
+
+        return self.max_top_logprobs > 0 and self.is_enabled(Indicator.TOP_K_LOGPROBS)
 
     def grammar(
         self,
@@ -410,9 +418,9 @@ class NaiveSampler(Struct):
 
                     selected = log_scores.gather(-1, targets)
 
-                    if self.is_enabled(Indicator.TOP_K_LOGPROBS):
+                    if self.return_top_logprobs:
 
-                        values, indices = log_scores.topk(k=MAX_TOP_LP, dim=-1)
+                        values, indices = log_scores.topk(k=self.max_top_logprobs, dim=-1)
 
                         targets = remap(indices, mapping=mapping)
                         top_logprobs = TopTargets(tokens=targets, logprobs=values)
@@ -428,9 +436,9 @@ class NaiveSampler(Struct):
                     .sub_(lse := logits.logsumexp(dim=-1, keepdim=True))
                 )
 
-                if self.is_enabled(Indicator.TOP_K_LOGPROBS):
+                if self.return_top_logprobs:
 
-                    values, indices = logits.topk(k=MAX_TOP_LP, dim=-1)
+                    values, indices = logits.topk(k=self.max_top_logprobs, dim=-1)
 
                     targets = remap(indices, mapping=mapping)
                     top_logprobs = TopTargets(tokens=targets, logprobs=values.sub_(lse))
@@ -459,10 +467,10 @@ class NaiveSampler(Struct):
 
                     selected = log_scores.gather(-1, targets)
 
-                    if self.is_enabled(Indicator.TOP_K_LOGPROBS):
+                    if self.return_top_logprobs:
 
-                        targets = indices[:, :MAX_TOP_LP]
-                        log_scores = log_scores[:, :MAX_TOP_LP]
+                        targets = indices[:, :self.max_top_logprobs]
+                        log_scores = log_scores[:, :self.max_top_logprobs]
 
                         top_logprobs = TopTargets(tokens=targets, logprobs=log_scores)
 
@@ -475,10 +483,10 @@ class NaiveSampler(Struct):
                 lse = values.to(F32).logsumexp(dim=-1, keepdim=True)
                 selected = values.gather(-1, targets).sub_(lse)
 
-                if self.is_enabled(Indicator.TOP_K_LOGPROBS):
+                if self.return_top_logprobs:
 
-                    targets = indices[:, :MAX_TOP_LP]
-                    log_scores = values[:, :MAX_TOP_LP].sub_(lse)
+                    targets = indices[:, :self.max_top_logprobs]
+                    log_scores = values[:, :self.max_top_logprobs].sub_(lse)
 
                     top_logprobs = TopTargets(tokens=targets, logprobs=log_scores)
 
@@ -553,10 +561,9 @@ class NaiveSampler(Struct):
                     .squeeze_(-1)
                 )
 
-                if self.is_enabled(Indicator.TOP_K_LOGPROBS):
+                if self.return_top_logprobs:
 
-                    values, indices = log_scores.topk(k=MAX_TOP_LP, dim=-1)
-
+                    values, indices = log_scores.topk(k=self.max_top_logprobs, dim=-1)
                     top_logprobs = TopTargets(tokens=indices, logprobs=values)
 
                 log_probs = LogProbabilities(selected=selected, top_k=top_logprobs)
@@ -627,11 +634,11 @@ class NaiveSampler(Struct):
                     .squeeze_(-1)
                 )
 
-                if self.is_enabled(Indicator.TOP_K_LOGPROBS):
+                if self.return_top_logprobs:
 
                     top_logprobs = TopTargets(
-                        tokens=indices[..., :MAX_TOP_LP],
-                        logprobs=log_scores[..., :MAX_TOP_LP],
+                        tokens=indices[..., :self.max_top_logprobs],
+                        logprobs=log_scores[..., :self.max_top_logprobs],
                     )
 
                 log_probs = LogProbabilities(selected=selected, top_k=top_logprobs)
@@ -672,12 +679,15 @@ class NaiveSampler(Struct):
         timestep: int,
         *,
         mapping: Tensor | None = None,
+        prefill: bool = False,
         logprobs: bool = False,
         probs: bool = False,
     ) -> Selection:
 
         pair = self.preamble(logits=logits, tokens=tokens, timestep=timestep, mapping=mapping)
-        weights = self.buffers.weights.gumbel.draft[:, timestep]
+
+        key = 'target' if prefill else 'draft'
+        weights = getattr(self.buffers.weights.gumbel, key)[:, timestep]
 
         return self.selection(logits, weights, pair, mapping, logprobs, probs)
 

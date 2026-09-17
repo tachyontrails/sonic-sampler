@@ -20,7 +20,7 @@ import torch
 
 from torch import Tensor
 
-from sonic_sampler.base.sampler import Selection, MAX_TOP_LP
+from sonic_sampler.base.sampler import Selection, DEFAULT_TOP_LOGPROBS
 from sonic_sampler.ops.base import next_power_of_2, MAX_K
 from sonic_sampler.interface.base import TopKStrategy
 from sonic_sampler.interface.dispatch import TwoStageWarpConfig
@@ -76,13 +76,14 @@ def fused_singular(
     # Required.
     logits: Tensor,
     indicators: Tensor,
-    # Model Specific(s).
+    # Model & Engine Specific(s).
     local_vocab: int | None = None,
     shard_size: int | None = None,
     world_size: int = 1,
     local_rank: int = 0,
     lookahead: int = 0,
     target_vocab: int | None = None,
+    max_top_logprobs: int = DEFAULT_TOP_LOGPROBS,
     # Conditional(s).
     enable_pdl: bool = True,
     is_prefill: bool = False,
@@ -150,7 +151,7 @@ def fused_singular(
     # Define block size(s).
 
     block_t = resolve_block(drafted_tokens, dim=1)
-    block_z = next_power_of_2(MAX_TOP_LP)
+    block_z = next_power_of_2(max_top_logprobs)
 
     # Resolve gumbel noise weight(s).
 
@@ -168,15 +169,21 @@ def fused_singular(
         buffer=draft_probabilities,
     )
 
-    selection = Selection.from_buffers(final_tokens, probabilities, return_logprobs)
+    selection = Selection.from_buffers(
+        tokens=final_tokens,
+        probabilities=probabilities,
+        logprobs=return_logprobs,
+        top_logprobs=max_top_logprobs,
+    )
+
     token_logprobs = top_logprobs = top_tokens = None
 
     if sl := selection.logprobs:
 
         token_logprobs = sl.selected
 
-        top_logprobs = (st := sl.top_k).logprobs
-        top_tokens = st.tokens
+        top_logprobs = (st := sl.top_k) and st.logprobs
+        top_tokens = st and st.tokens
 
     # Resolve sharding specific(s).
 

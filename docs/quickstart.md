@@ -55,17 +55,26 @@ sampler = UnshardedFusedSingular.initialize(
     vocab_size=model.vocab_size,
     batch_size=max_batch_size,
     lookahead=lookahead,
+    max_top_logprobs=max_top_logprobs,   # Z
 )
 
 verifier = UnshardedFusedMultistep.initialize(
     vocab_size=model.vocab_size,
     lookahead=lookahead,
     batch_size=max_batch_size,
+    max_top_logprobs=max_top_logprobs,   # Z
 )
 ```
 
 A non-speculative engine constructs `buffers` with `timesteps=1`, initializes `sampler` with
 `lookahead=0`, and skips `verifier` entirely.
+
+`max_top_logprobs` is the width of the emitted top-$`k`$ logprob block. Pass the maximum your API
+advertises, e.g. the `top_logprobs` ceiling of an OpenAI-compatible endpoint, or pass $0$ if the
+engine does not expose top-$`k`$ logprobs at all; omitting it falls back to `DEFAULT_TOP_LOGPROBS`,
+which is $5$. The value is fixed for the lifetime of the interface, must not exceed `MAX_K` $= 128$,
+and bounds every admitted request's `top_logprobs`. See
+[the top-logprob width](concepts.md#the-top-logprob-width).
 
 ### What `default` leaves behind
 
@@ -100,10 +109,15 @@ Each call then narrows further. `self.tuning(n_rows, ...)` matches a `BatchBucke
 count of the current launch and yields the warp configuration, the top-$`k`$ strategy, and a possibly
 revised `block_n`. Passing an explicit `strategy` or `tuning` overrides the resolution.
 
-Initialization raises `ValueError` when the architecture has no shipped table, when no bucket
-matches $V$, when $k$ exceeds $128$ or is not a power of two, or when $V$ fits in a single
-vocabulary tile. Supplying `block_size` bypasses the table lookup and pins the tile width; supply
-`arch` to resolve against a device other than the current one.
+Initialization raises `ValueError` with any of the following cases:
+- When the architecture has no shipped table
+- When no bucket matches $V$
+- When $k$ exceeds $128$ or is not a power of two
+- When `max_top_logprobs` falls outside the inclusive range $[\,0, 128\,]$
+- When $V$ fits in a single vocabulary tile
+
+Supplying `block_size` bypasses the table lookup and pins the tile width or supply `arch` to resolve against a
+device other than the current one.
 
 ## A minimal decode step
 
@@ -157,9 +171,10 @@ buffers = SamplingBuffers.random(
     vocab_size=model.vocab_size,
     device=device,
     seed=0,
+    max_top_logprobs=max_top_logprobs,
 )
 
-reference = NaiveSampler(buffers=buffers)
+reference = NaiveSampler(buffers=buffers, max_top_logprobs=max_top_logprobs)
 
 expected = reference.singular(logits=logits, tokens=None, timestep=0, logprobs=True)
 actual = sampler.drafting(logits, buffers, timestep=0)
@@ -168,5 +183,7 @@ actual = sampler.drafting(logits, buffers, timestep=0)
 Driving both paths with the same buffers and the same logits pins down the expected tokens and
 log-probabilities. Match the scope when comparing: `NaiveSampler.singular` reads the draft weights
 and mirrors `drafting(...)`, while `NaiveSampler.multistep` reads the target weights and mirrors
-the verifier. Both helpers exist for correctness work rather than production use, so an integration
-should not depend on them at runtime.
+the verifier. Match `max_top_logprobs` across `random`, `NaiveSampler`, and the interface under
+test, $0$ included, or the reference and the kernel emit blocks of different shapes. Both helpers
+exist for correctness work rather than production use, so an integration should not depend on them
+at runtime.

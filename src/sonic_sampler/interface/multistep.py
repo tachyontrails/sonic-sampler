@@ -24,7 +24,7 @@ from torch import Tensor
 
 from triton import cdiv     # noqa.
 
-from sonic_sampler.base.sampler import Verification
+from sonic_sampler.base.sampler import Verification, DEFAULT_TOP_LOGPROBS
 from sonic_sampler.core.buffer import SamplingBuffers
 from sonic_sampler.ops.base import MAX_K
 from sonic_sampler.interface.base import TwoStageTiling, TopKStrategy
@@ -45,6 +45,9 @@ class UnshardedFusedMultistep(TwoStageTiling):
     # The maximum speculation lookahead, γ.
     lookahead: int
 
+    # The static maxima for top-k log-probabilities.
+    max_top_logprobs: int
+
     # The fp32 top-k values buffer with shape [ B • (γ + 1), M ].
     values: Tensor
 
@@ -60,6 +63,7 @@ class UnshardedFusedMultistep(TwoStageTiling):
         pdl: bool = True,
         block_size: int | None = None,
         arch: int | None = None,
+        max_top_logprobs: int = DEFAULT_TOP_LOGPROBS,
     ) -> UnshardedFusedMultistep:
 
         factory, values, indices = cls.factory(
@@ -67,6 +71,7 @@ class UnshardedFusedMultistep(TwoStageTiling):
             batch_size=batch_size,
             lookahead=lookahead,
             k=MAX_K,
+            top_logprobs=max_top_logprobs,
             block_size=block_size,
             arch=arch,
             enable_pdl=pdl,
@@ -78,6 +83,7 @@ class UnshardedFusedMultistep(TwoStageTiling):
             pdl=factory.pdl,
             block_n=factory.block_n,
             lookahead=lookahead,
+            max_top_logprobs=max_top_logprobs,
             vocabulary=factory.vocabulary,
             scratchpad=factory.scratchpad,
             values=values,
@@ -125,6 +131,7 @@ class UnshardedFusedMultistep(TwoStageTiling):
             indicators=buffers.flags.target,
             drafted_tokens=tokens,
             lookahead=self.lookahead,
+            max_top_logprobs=self.max_top_logprobs,
             enable_pdl=self.pdl,
             update_counts=update_counts,
             return_logprobs=logprobs,

@@ -28,7 +28,7 @@ from typing import Callable, List, Self
 
 from torch import Stream, Tensor
 
-from sonic_sampler.base import SliceBuffer, Layout, MAX_TOP_LP
+from sonic_sampler.base import SliceBuffer, Layout
 from sonic_sampler.ops import MAX_K
 
 
@@ -174,7 +174,7 @@ class Indicator(IntFlag):
             1 < top_k < MAX_K,
             not greedy and (0.0 < top_p < 1.0),
             not greedy and (0.0 < min_p < 1.0),
-            not greedy and (0 < top_k_logprobs <= MAX_TOP_LP),
+            not greedy and (0 < top_k_logprobs <= MAX_K),
             not greedy and greedy_draft,
         ]
 
@@ -355,7 +355,7 @@ class ScopedIndicators(SliceBuffer):
             layout = Layout(size, timesteps)
 
             draft = [
-                indicator.greedy() if greedy else indicator
+                indicator.greedy() if greedy else indicator.disable(Indicator.TOP_K_LOGPROBS)
                 for greedy, indicator in zip(drafter, target)
             ]
 

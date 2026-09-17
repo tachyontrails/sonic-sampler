@@ -24,7 +24,7 @@ from torch import Tensor
 
 from triton import cdiv     # noqa.
 
-from sonic_sampler.base.sampler import Selection
+from sonic_sampler.base.sampler import Selection, DEFAULT_TOP_LOGPROBS
 from sonic_sampler.core.buffer import SamplingBuffers
 from sonic_sampler.interface.dispatch import TwoStageWarpConfig
 from sonic_sampler.interface.base import TwoStageTiling, TopKStrategy
@@ -60,6 +60,9 @@ class UnshardedFusedSingular(TwoStageTiling):
     # The speculation lookahead, γ.
     lookahead: int
 
+    # The static maxima for top-k log-probabilities.
+    max_top_logprobs: int
+
     @classmethod
     def initialize(
         cls,
@@ -69,6 +72,7 @@ class UnshardedFusedSingular(TwoStageTiling):
         pdl: bool = True,
         block_size: int | None = None,
         arch: int | None = None,
+        max_top_logprobs: int = DEFAULT_TOP_LOGPROBS,
     ) -> UnshardedFusedSingular:
 
         factory, _, _ = cls.factory(
@@ -76,6 +80,7 @@ class UnshardedFusedSingular(TwoStageTiling):
             batch_size=batch_size,
             lookahead=lookahead,
             k=MAX_K,
+            top_logprobs=max_top_logprobs,
             block_size=block_size,
             arch=arch,
             enable_pdl=pdl,
@@ -87,6 +92,7 @@ class UnshardedFusedSingular(TwoStageTiling):
             pdl=factory.pdl,
             block_n=factory.block_n,
             lookahead=lookahead,
+            max_top_logprobs=max_top_logprobs,
             vocabulary=factory.vocabulary,
             scratchpad=factory.scratchpad,
             dispatch=factory.dispatch,
@@ -110,6 +116,7 @@ class UnshardedFusedSingular(TwoStageTiling):
         return fused_singular(
             logits=logits,
             indicators=buffers.flags.target,
+            max_top_logprobs=self.max_top_logprobs,
             enable_pdl=self.pdl,
             is_prefill=prefill,
             update_counts=update_counts,

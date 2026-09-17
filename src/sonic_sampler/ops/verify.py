@@ -386,7 +386,7 @@ def chain_speculative_verification_kernel(
             log_scores = fast_logf(targets)
             span_mask = (span <= accepted)
 
-            if (indicator & 0x400) > 0:
+            if block_z and (indicator & 0x400) > 0:
 
                 # Extract top-k token indices and compute their corresponding log-probabilities.
 

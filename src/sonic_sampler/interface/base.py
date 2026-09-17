@@ -24,6 +24,7 @@ from torch import Tensor
 
 from triton import cdiv     # noqa.
 
+from sonic_sampler.base.sampler import DEFAULT_TOP_LOGPROBS
 from sonic_sampler.interface.dispatch import (
     DispatchSummary,
     RuntimeConfig,
@@ -173,6 +174,7 @@ class TwoStageTiling(Struct):
         cls,
         vocab_size: int,
         k: int = MAX_K,
+        top_logprobs: int = DEFAULT_TOP_LOGPROBS,
         block_size: int | None = None,
         arch: int | None = None,
         ensure_multiblock: bool = True,
@@ -185,6 +187,10 @@ class TwoStageTiling(Struct):
 
             raise ValueError(f"total vocab blocks must be greater than 1, got {blocks} instead")
 
+        elif top_logprobs < 0 or top_logprobs > MAX_K:
+
+            raise ValueError(f"top logprobs must be within the interval [0, {MAX_K}]")
+
         else:
 
             return dispatch, vocabulary, block_n
@@ -196,6 +202,7 @@ class TwoStageTiling(Struct):
         batch_size: int = 32,
         lookahead: int = 0,
         k: int = MAX_K,
+        top_logprobs: int = DEFAULT_TOP_LOGPROBS,
         block_size: int | None = None,
         arch: int | None = None,
         enable_pdl: bool = True,
@@ -207,6 +214,7 @@ class TwoStageTiling(Struct):
         dispatch, vocabulary, block_n = cls.resolve(
             vocab_size=vocab_size,
             k=k,
+            top_logprobs=top_logprobs,
             block_size=block_size,
             arch=arch,
             ensure_multiblock=ensure_multiblock,

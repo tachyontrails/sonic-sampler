@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import torch
 
+from typing import Final
+
 from msgspec import Struct
 
 from torch import Tensor
 
 
-MAX_TOP_LP: int = 5
+DEFAULT_TOP_LOGPROBS: Final[int] = 5
+
 
 I32: torch.dtype = torch.int32
 BF16: torch.dtype = torch.bfloat16
@@ -38,22 +41,26 @@ class TopTargets(Struct):
     logprobs: Tensor
 
     @classmethod
-    def empty_blocked(cls, batch_size: int, timesteps: int = 1) -> TopTargets:
+    def empty_blocked(cls, batch_size: int, targets: int, timesteps: int = 1) -> TopTargets | None:
 
-        shape = (batch_size, timesteps, MAX_TOP_LP) if timesteps > 1 else (batch_size, MAX_TOP_LP)
+        if targets > 0:
 
-        tokens = torch.empty(shape, dtype=I32)
-        logprobs = torch.empty(shape, dtype=BF16)
+            shape = (batch_size, timesteps, targets) if timesteps > 1 else (batch_size, targets)
 
-        return cls(tokens=tokens, logprobs=logprobs)
+            tokens = torch.empty(shape, dtype=I32)
+            logprobs = torch.empty(shape, dtype=BF16)
+
+            return cls(tokens=tokens, logprobs=logprobs)
 
     @classmethod
-    def empty_varlen(cls, num_tokens: int) -> TopTargets:
+    def empty_varlen(cls, num_tokens: int, targets: int) -> TopTargets | None:
 
-        tokens = torch.empty(num_tokens, MAX_TOP_LP, dtype=I32)
-        logprobs = torch.empty(num_tokens, MAX_TOP_LP, dtype=BF16)
+        if targets > 0:
 
-        return cls(tokens=tokens, logprobs=logprobs)
+            tokens = torch.empty(num_tokens, targets, dtype=I32)
+            logprobs = torch.empty(num_tokens, targets, dtype=BF16)
+
+            return cls(tokens=tokens, logprobs=logprobs)
 
 
 class LogProbabilities(Struct):
@@ -66,19 +73,19 @@ class LogProbabilities(Struct):
 
     @classmethod
     def empty_blocked(
-        cls, batch_size: int, timesteps: int = 1, top_k: bool = False
+        cls, batch_size: int, timesteps: int = 1, top_k: int = 0
     ) -> LogProbabilities:
 
         selected = torch.empty(batch_size, timesteps, dtype=BF16)
-        targets = TopTargets.empty_blocked(batch_size, timesteps) if top_k else None
+        targets = TopTargets.empty_blocked(batch_size, top_k, timesteps)
 
         return cls(selected=selected, top_k=targets)
 
     @classmethod
-    def empty_varlen(cls, num_tokens: int, top_k: bool = False) -> LogProbabilities:
+    def empty_varlen(cls, num_tokens: int, top_k: int = 0) -> LogProbabilities:
 
         selected = torch.empty(num_tokens, dtype=BF16)
-        targets = TopTargets.empty_varlen(num_tokens) if top_k else None
+        targets = TopTargets.empty_varlen(num_tokens, top_k)
 
         return cls(selected=selected, top_k=targets)
 
@@ -96,7 +103,11 @@ class Selection(Struct):
 
     @classmethod
     def from_buffers(
-        cls, tokens: Tensor, probabilities: Tensor | None = None, logprobs: bool = False,
+        cls,
+        tokens: Tensor,
+        probabilities: Tensor | None = None,
+        logprobs: bool = False,
+        top_logprobs: int = 0,
     ) -> Selection:
 
         logprobs_buffer = None
@@ -105,7 +116,10 @@ class Selection(Struct):
 
             with torch.device(tokens.device):
 
-                logprobs_buffer = LogProbabilities.empty_blocked(tokens.size(0), top_k=True)
+                logprobs_buffer = LogProbabilities.empty_blocked(
+                    batch_size=tokens.size(0),
+                    top_k=top_logprobs,
+                )
 
         return cls(tokens=tokens, probabilities=probabilities, logprobs=logprobs_buffer)
 
@@ -117,7 +131,7 @@ class Selection(Struct):
         device: torch.device,
         probs: bool = False,
         logprobs: bool = False,
-        top_logprobs: bool = False,
+        top_logprobs: int = 0,
     ) -> Selection:
 
         probs_buffer = logprobs_buffer = None
@@ -156,6 +170,7 @@ class Verification(Struct):
         timesteps: int,
         logprobs: bool = False,
         varlen: bool = False,
+        top_logprobs: int = 0,
     ) -> Verification:
 
         logprobs_buffer = None
@@ -170,7 +185,7 @@ class Verification(Struct):
 
                     logprobs_buffer = LogProbabilities.empty_varlen(
                         num_tokens=tokens.size(0),
-                        top_k=True,
+                        top_k=top_logprobs,
                     )
 
                 else:
@@ -178,7 +193,7 @@ class Verification(Struct):
                     logprobs_buffer = LogProbabilities.empty_blocked(
                         batch_size=batch_size,
                         timesteps=timesteps,
-                        top_k=True,
+                        top_k=top_logprobs,
                     )
 
             return cls(tokens=tokens, offsets=offsets, logprobs=logprobs_buffer)

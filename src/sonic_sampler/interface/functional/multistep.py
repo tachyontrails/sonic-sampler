@@ -24,7 +24,7 @@ from torch import Tensor
 
 from triton import cdiv     # noqa.
 
-from sonic_sampler.base.sampler import Verification, MAX_TOP_LP
+from sonic_sampler.base.sampler import Verification, DEFAULT_TOP_LOGPROBS
 from sonic_sampler.ops.base import next_power_of_2, MAX_K
 from sonic_sampler.interface.functional.base import (
     I32,
@@ -177,12 +177,13 @@ def fused_multistep(
     logits: Tensor,
     indicators: Tensor,
     drafted_tokens: Tensor,
-    # Model Specific(s).
+    # Model & Engine Specific(s).
     local_vocab: int | None = None,
     shard_size: int | None = None,
     world_size: int = 1,
     local_rank: int = 0,
     lookahead: int | None = None,
+    max_top_logprobs: int = DEFAULT_TOP_LOGPROBS,
     # Conditional(s).
     enable_pdl: bool = True,
     update_counts: bool = False,
@@ -267,7 +268,7 @@ def fused_multistep(
     block_q = resolve_block(cu_seqlens, dim=0)
 
     block_g = next_power_of_2(gamma + 1)
-    block_z = next_power_of_2(MAX_TOP_LP)
+    block_z = next_power_of_2(max_top_logprobs)
 
     # Resolve gumbel noise weight(s).
 
@@ -282,6 +283,7 @@ def fused_multistep(
         timesteps=gamma + 1,
         logprobs=return_logprobs,
         varlen=varlen,
+        top_logprobs=max_top_logprobs,
     )
 
     token_logprobs = top_logprobs = top_tokens = None
@@ -290,8 +292,8 @@ def fused_multistep(
 
         token_logprobs = vl.selected
 
-        top_logprobs = collapse_2d((vt := vl.top_k).logprobs)
-        top_tokens = vt.tokens
+        top_logprobs = (vt := vl.top_k) and collapse_2d(vt.logprobs)
+        top_tokens = vt and vt.tokens
 
     # Resolve sharding specific(s).
 

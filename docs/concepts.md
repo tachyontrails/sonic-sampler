@@ -14,6 +14,7 @@ batching strategy.
 | $\gamma$ | Speculation lookahead, i.e. the number of tokens the drafter proposes per iteration |
 | $\gamma + 1$ | Timesteps per request, the $\gamma$ drafted positions plus the bonus position       |
 | $k$ | Top-$`k`$ truncation bound, capped at $\text{MAX\\_K} = 128$                          |
+| $Z$ | Width of the emitted top-$`k`$ logprob block, i.e. `max_top_logprobs`, $Z \le \text{MAX\\_K}$ |
 
 Non-speculative engines set $\gamma = 0$, which collapses every timestep dimension to $1$.
 
@@ -207,10 +208,12 @@ Single-step sampling returns a `Selection`:
 | `tokens` | `[ B, 1 ]` | `int32` | always |
 | `probabilities` | `[ B, V_t ]` | `bfloat16` | drafting with a stochastic draft |
 | `logprobs.selected` | `[ B, 1 ]` | `bfloat16` | `logprobs=True` |
-| `logprobs.top_k.tokens` | `[ B, 5 ]` | `int32` | `logprobs=True` |
-| `logprobs.top_k.logprobs` | `[ B, 5 ]` | `bfloat16` | `logprobs=True` |
+| `logprobs.top_k.tokens` | `[ B, Z ]` | `int32` | `logprobs=True` and $Z > 0$ |
+| `logprobs.top_k.logprobs` | `[ B, Z ]` | `bfloat16` | `logprobs=True` and $Z > 0$ |
 
-Here $V_t$ is the target vocabulary, which coincides with $V$ except under cross-vocab drafting.
+Here $V_t$ is the target vocabulary, which coincides with $V$ except under cross-vocab drafting, and
+$Z$ is the top-logprob width the integration fixed at initialization, see
+[the top-logprob width](#the-top-logprob-width) below.
 
 Chain verification returns a `Verification`:
 
@@ -219,8 +222,8 @@ Chain verification returns a `Verification`:
 | `tokens` | `[ B, γ + 1 ]` | `int32` | always |
 | `offsets` | `[ B, 1 ]` | `int32` | always |
 | `logprobs.selected` | `[ B, γ + 1 ]` | `bfloat16` | `logprobs=True` |
-| `logprobs.top_k.tokens` | `[ B, γ + 1, 5 ]` | `int32` | `logprobs=True` |
-| `logprobs.top_k.logprobs` | `[ B, γ + 1, 5 ]` | `bfloat16` | `logprobs=True` |
+| `logprobs.top_k.tokens` | `[ B, γ + 1, Z ]` | `int32` | `logprobs=True` and $Z > 0$ |
+| `logprobs.top_k.logprobs` | `[ B, γ + 1, Z ]` | `bfloat16` | `logprobs=True` and $Z > 0$ |
 
 `offsets` is the count of accepted draft tokens. Row $i$ therefore emits
 $\texttt{offsets}[i] + 1$ tokens, the accepted prefix plus the corrected or bonus token:
@@ -229,6 +232,36 @@ $\texttt{offsets}[i] + 1$ tokens, the accepted prefix plus the corrected or bonu
 span = verification.offsets[i] + 1
 emitted = verification.tokens[i, :span]
 ```
+
+### The top-logprob width
+
+The width $Z$ of the emitted top-$`k`$ logprob block is an integration-level decision, not a fixed
+constant. Every entry point exposes it as `max_top_logprobs`:
+
+| Rung | Where $Z$ is set | Default |
+| :--- | :--- | :--- |
+| Modular | `initialize(..., max_top_logprobs=Z)`, once per process | `DEFAULT_TOP_LOGPROBS` |
+| Functional | `fused_singular(..., max_top_logprobs=Z)`, `fused_multistep(..., max_top_logprobs=Z)`, per call | `DEFAULT_TOP_LOGPROBS` |
+
+`DEFAULT_TOP_LOGPROBS` is $5$, the OpenAI-compatible default, and applies only when the argument is
+omitted. An engine that advertises its own maximum, say $20$, should pass that value instead. The
+resulting contract is a single chain:
+
+$$
+0 \le \texttt{top\\_logprobs} \le Z \le \text{MAX\\_K} = 128
+$$
+
+$Z$ is bounded by `MAX_K` because the block is carved out of the top-$`k`$ selection;
+`TwoStageTiling.resolve` raises `ValueError` outside $[\,0, 128\,]$, and every `initialize(...)`
+reaches it. Per-request `top_logprobs` is bounded by $Z$ because $Z$ fixes the allocated width for
+the lifetime of the interface while `top_logprobs` varies per request, so a request asking for more
+has no buffer to land in and must be clamped or rejected at admission.
+
+$Z = 0$ is supported and disables top-$`k`$ logprobs outright: `logprobs.top_k` is `None`,
+`logprobs.selected` is still emitted under `logprobs=True`, and the kernel's top-logprob path is
+compiled out. The two tiers of disablement are therefore distinct. $Z = 0$ turns the capability off
+for the lifetime of the process, while clearing the per-request `TOP_K_LOGPROBS` indicator turns it
+off for one request against an interface that still allocates the block.
 
 ### In-place outputs
 
@@ -262,9 +295,12 @@ vocabulary dimension is expected to be the innermost, unit-stride axis.
 `ValueError` for a larger finite $k$, so reject such requests at admission. A request that disables
 top-$`k`$ altogether is realized as bounded top-$`128`$ truncation.
 
-**Top-$`k`$ logprobs are capped at 5.** `MAX_TOP_LP` is an internal compile-time constant fixing the
-width of the top-$`k`$ logprob block. A larger request must be truncated or rejected by the engine.
-The bound is an implementation limit and may be relaxed in a future version.
+**Top-$`k`$ logprobs are bounded by the width the engine chose**, i.e.
+$0 \le \texttt{top\\_logprobs} \le Z \le \text{MAX\\_K}$, where $Z$ is `max_top_logprobs`. Clamping
+per-request `top_logprobs` against $Z$ is an admission-time duty: `ScopedIndicators.from_params`
+checks only that the value is representable by the kernels, i.e.
+$0 < \texttt{top\\_logprobs} \le 128$, and leaves `TOP_K_LOGPROBS` unset otherwise rather than
+failing the batch. See [the top-logprob width](#the-top-logprob-width).
 
 **Greedy rows carry no logprobs.** The greedy path writes only the token. The reference semantics
 in `NaiveSampler` define the selected logprob of a greedy row as $0$, the log of a point mass, with

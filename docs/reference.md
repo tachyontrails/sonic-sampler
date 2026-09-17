@@ -5,7 +5,7 @@ Lookup tables for the public surface. See [`concepts.md`](concepts.md) for what 
 ## Imports
 
 ```python
-from sonic_sampler.base import Selection, Verification, LogProbabilities, MAX_TOP_LP
+from sonic_sampler.base import Selection, Verification, LogProbabilities, DEFAULT_TOP_LOGPROBS
 from sonic_sampler.core import SamplingBuffers, Indicator, NaiveSampler
 from sonic_sampler.core.flags import ScopedIndicators
 from sonic_sampler.interface import (
@@ -22,15 +22,19 @@ from sonic_sampler.interface.base import TwoStageTiling
 from sonic_sampler.ops import MAX_K
 ```
 
-`UnshardedBoundedTopK` exposes the bounded top-$k$ primitive on its own, for engines that want the
+`UnshardedBoundedTopK` exposes the bounded top-$`k`$ primitive on its own, for engines that want the
 selection stage without the sampling pipeline around it.
 
 ## Constants
 
 | Constant | Value | Meaning |
 | :--- | :--- | :--- |
-| `MAX_K` | $128$ | Upper bound on top-$k$, and the width of the selection block |
-| `MAX_TOP_LP` | $5$ | Width of the emitted top-$k$ logprob block |
+| `MAX_K` | $128$ | Upper bound on top-$`k`$, and the width of the selection block |
+| `DEFAULT_TOP_LOGPROBS` | $5$ | Default width of the emitted top-$`k`$ logprob block, i.e. the fallback for `max_top_logprobs` |
+
+`max_top_logprobs` is the width $Z$ of the top-$`k`$ logprob block, chosen by the engine within
+$[\ 0,\ \texttt{MAX\\_K}\ ]$ and defaulting to `DEFAULT_TOP_LOGPROBS` at every entry point; see
+[`concepts.md`](concepts.md#the-top-logprob-width).
 
 ## Buffers
 
@@ -63,7 +67,7 @@ Memory, dominated by the noise buffers:
 
 $$
 M \approx 2 \cdot B \cdot (\gamma + 1) \cdot V \cdot 2\ \text{bytes}
-\;+\; 3 \cdot B \cdot V \cdot 4\ \text{bytes}
+\ +\ 3 \cdot B \cdot V \cdot 4\ \text{bytes}
 $$
 
 ### In-flight buffers
@@ -119,10 +123,13 @@ def random(
     device: torch.device | None = None,
     seed: int | None = None,
     bounded: bool = True,
+    max_top_logprobs: int = DEFAULT_TOP_LOGPROBS,
 ) -> SamplingBuffers
 ```
 
-Allocates a randomly populated instance for testing.
+Allocates a randomly populated instance for testing. `max_top_logprobs` bounds the drawn
+`top_logprobs` values inclusively and should match the width the interface under test was
+initialized with; passing $0$ clears `TOP_K_LOGPROBS` on every indicator it produces.
 
 ### `allocate`
 
@@ -235,6 +242,7 @@ def initialize(
     pdl: bool = True,
     block_size: int | None = None,
     arch: int | None = None,
+    max_top_logprobs: int = DEFAULT_TOP_LOGPROBS,
 ) -> UnshardedFusedSingular
 ```
 
@@ -248,12 +256,19 @@ def initialize(
     pdl: bool = True,
     block_size: int | None = None,
     arch: int | None = None,
+    max_top_logprobs: int = DEFAULT_TOP_LOGPROBS,
 ) -> UnshardedFusedMultistep
 ```
 
 `lookahead` is required for the verifier and defaults to $0$ for the sampler. `block_size` pins the
 vocabulary tile width and bypasses the tuned lookup, and `arch` targets a device other than the
 current one.
+
+`max_top_logprobs` fixes the width $Z$ of the emitted top-$`k`$ logprob block for the lifetime of the
+interface and is retained on the struct as `self.max_top_logprobs`. An engine with its own
+advertised maximum should pass it here rather than relying on `DEFAULT_TOP_LOGPROBS`, and must keep
+every per-request `top_logprobs` within $[\ 0,\ Z\ ]$. A value outside $[\ 0,\ 128\ ]$, i.e. beyond
+`MAX_K`, raises `ValueError` while $Z = 0$ is valid and emits no top-$`k`$ block at all.
 
 ### `UnshardedFusedSingular.autoregressive`
 
@@ -268,7 +283,8 @@ current one.
 | `strategy` | `TopKStrategy \| None` | `None` |
 | `tuning` | `TwoStageWarpConfig \| None` | `None` |
 
-Reads `flags.target`, `grammar[:, 0]`, and `gumbel.target[:, 0]`.
+Reads `flags.target`, `grammar[:, 0]`, and `gumbel.target[:, 0]`. Under `logprobs=True` the top-$`k`$
+block is `self.max_top_logprobs` wide, as fixed at `initialize`.
 
 ### `UnshardedFusedSingular.drafting`
 
@@ -307,7 +323,8 @@ since draft distributions are surfaced through `probabilities` instead.
 | `tuning` | `ThreeStageWarpConfig \| None` | `None` |
 
 Reads `flags.target`, the full `grammar`, `gumbel.target`, and `weights.uniform`. With
-`in_place=True`, `verification.tokens` is `tokens` itself rather than a clone.
+`in_place=True`, `verification.tokens` is `tokens` itself rather than a clone. Under
+`logprobs=True` the top-$`k`$ block is `self.max_top_logprobs` wide, as fixed at `initialize`.
 
 ## Outputs
 
@@ -318,8 +335,8 @@ Reads `flags.target`, the full `grammar`, `gumbel.target`, and `weights.uniform`
 | `tokens` | `[ B, 1 ]` | `int32` |
 | `probabilities` | `[ B, V_t ]` | `bfloat16` |
 | `logprobs.selected` | `[ B, 1 ]` | `bfloat16` |
-| `logprobs.top_k.tokens` | `[ B, MAX_TOP_LP ]` | `int32` |
-| `logprobs.top_k.logprobs` | `[ B, MAX_TOP_LP ]` | `bfloat16` |
+| `logprobs.top_k.tokens` | `[ B, Z ]` | `int32` |
+| `logprobs.top_k.logprobs` | `[ B, Z ]` | `bfloat16` |
 
 ### `Verification`
 
@@ -328,11 +345,11 @@ Reads `flags.target`, the full `grammar`, `gumbel.target`, and `weights.uniform`
 | `tokens` | `[ B, γ + 1 ]` | `int32` |
 | `offsets` | `[ B, 1 ]` | `int32` |
 | `logprobs.selected` | `[ B, γ + 1 ]` | `bfloat16` |
-| `logprobs.top_k.tokens` | `[ B, γ + 1, MAX_TOP_LP ]` | `int32` |
-| `logprobs.top_k.logprobs` | `[ B, γ + 1, MAX_TOP_LP ]` | `bfloat16` |
+| `logprobs.top_k.tokens` | `[ B, γ + 1, Z ]` | `int32` |
+| `logprobs.top_k.logprobs` | `[ B, γ + 1, Z ]` | `bfloat16` |
 
 `logprobs` is `None` unless the call requested it, and `probabilities` is `None` unless the draft
-path produced it.
+path produced it. $Z$ is `max_top_logprobs`, and `logprobs.top_k` is `None` when $Z = 0$.
 
 ## Indicators
 
@@ -345,15 +362,17 @@ path produced it.
 | `0x010` | `BIAS` | Logit bias |
 | `0x020` | `TEMPERATURE` | Temperature scaling |
 | `0x040` | `GREEDY` | Argmax selection |
-| `0x080` | `TOP_K` | Top-$k$ truncation |
+| `0x080` | `TOP_K` | Top-$`k`$ truncation |
 | `0x100` | `TOP_P` | Nucleus truncation |
-| `0x200` | `MIN_P` | Min-$p$ truncation |
-| `0x400` | `TOP_K_LOGPROBS` | Top-$k$ logprob emission |
+| `0x200` | `MIN_P` | Min-$`p`$ truncation |
+| `0x400` | `TOP_K_LOGPROBS` | Top-$`k`$ logprob emission |
 | `0x800` | `STOCHASTIC_VERIFY_GREEDY_DRAFT` | Masked residual verification |
 
-Helpers: `Indicator.stochastic()` is the temperature, top-$k$, top-$p$, and min-$p$ group;
-`Indicator.repetition()` is the three penalty bits; `Indicator.maximal()` is every bit except
-`GREEDY`; `indicator.greedy()` clears the stochastic group and sets `GREEDY`.
+Helpers: 
+- `Indicator.stochastic()` is the temperature, top-$`k`$, top-$`p`$, and min-$`p`$ group
+- `Indicator.repetition()` is the three penalty bits
+- `Indicator.maximal()` is every bit except `GREEDY`
+- `indicator.greedy()` clears the stochastic group and sets `GREEDY`
 
 `ScopedIndicators.from_params(size, timesteps, ..., greedy_drafts)` derives the `(target, draft)`
 pair from the sampling parameters. Useful predicates on the result:
@@ -376,6 +395,7 @@ def resolve(
     cls,
     vocab_size: int,
     k: int = MAX_K,
+    top_logprobs: int = DEFAULT_TOP_LOGPROBS,
     block_size: int | None = None,
     arch: int | None = None,
     ensure_multiblock: bool = True,
@@ -392,6 +412,7 @@ def factory(
     batch_size: int = 32,
     lookahead: int = 0,
     k: int = MAX_K,
+    top_logprobs: int = DEFAULT_TOP_LOGPROBS,
     block_size: int | None = None,
     arch: int | None = None,
     enable_pdl: bool = True,
@@ -412,23 +433,31 @@ def tuning(
 ) -> Tuple[TwoStageWarpConfig, TopKStrategy, int]
 ```
 
-`resolve` raises `ValueError` when $k$ exceeds `MAX_K`, when $k$ is not a power of two, when no
-tuned table exists for the architecture, when no `VocabBucket` matches $V$, or when
-`ensure_multiblock` is set and $V$ fits in a single tile.
+`resolve` raises `ValueError` when $k$ exceeds `MAX_K`, when $k$ is not a power of two, when
+`top_logprobs` falls outside $[\ 0,\ 128\ ]$, when no tuned table exists for the architecture, when
+no `VocabBucket` matches $V$, or when `ensure_multiblock` is set and $V$ fits in a single tile. Both
+modular interfaces route their `max_top_logprobs` through here as `top_logprobs`, so the bound is
+enforced once, at construction.
 
 ### `fused_singular` and `fused_multistep`
 
 The functional entry points take every buffer explicitly. Their arguments group as:
 
-| Group | Arguments |
-| :--- | :--- |
-| Inputs | `logits`, `indicators`, `drafted_tokens` (multistep) |
-| Modes | `enable_pdl`, `is_prefill`, `update_counts`, `return_logprobs`, `return_probabilities`, `lookahead` |
-| Tiling | `block_n`, `scratchpad`, `values`, `indices`, `topk_strategy`, `warp_config` |
-| Manipulators | `slot_mapping`, `d2t_mapping`, `grammar`, `context_counts`, `decode_counts`, `repetition_penalties`, `frequency_penalties`, `presence_penalties`, `logit_bias`, `temperature`, `top_k`, `top_p`, `min_p`, `top_k_logprobs` |
-| Weights | `gumbel_noise`, `uniform_noise` |
-| Outputs | `output_tokens`, `draft_probabilities` |
+| Group          | Arguments                                                                                                                                                                                                                  |
+|:---------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Inputs         | `logits`, `indicators`, `drafted_tokens` (multistep)                                                                                                                                                                       |
+| Model & Engine | `local_vocab`, `shard_size`, `world_size`, `local_rank`, `target_vocab` (singular), `max_top_logprobs`                                                                                                                     |
+| Modes          | `enable_pdl`, `is_prefill`, `update_counts`, `return_logprobs`, `return_probabilities`, `lookahead`                                                                                                                        |
+| Tiling         | `block_n`, `scratchpad`, `values`, `indices`, `topk_strategy`, `warp_config`                                                                                                                                               |
+| Manipulators   | `slot_mapping`, `d2t_mapping`, `grammar`, `context_counts`, `decode_counts`, `repetition_penalties`, `frequency_penalties`, `presence_penalties`, `logit_bias`, `temperature`, `top_k`, `top_p`, `min_p`, `top_k_logprobs` |
+| Weights        | `gumbel_noise`, `uniform_noise`                                                                                                                                                                                            |
+| Outputs        | `output_tokens`, `draft_probabilities`                                                                                                                                                                                     |
 
 Any buffer left `None` is allocated inside the call, which is convenient for one-off use and
 incompatible with graph capture. Every manipulator is independently optional: omitting one leaves
 the corresponding stage inactive regardless of the indicator bits.
+
+`max_top_logprobs` sizes the `Selection` or `Verification` top-$`k`$ block and is resolved per call at
+this rung, so pass the engine's advertised maximum on every call to keep the emitted shape stable.
+There is no construction-time check here, unlike the modular rung, so keep the value within
+`MAX_K`.

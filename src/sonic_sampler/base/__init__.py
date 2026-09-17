@@ -7,6 +7,6 @@ from sonic_sampler.base.sampler import (
     Selection,
     TopTargets,
     Verification,
-    MAX_TOP_LP,
+    DEFAULT_TOP_LOGPROBS,
 )
 from sonic_sampler.base.tensor import PrefixContiguousTensor, TimeDifferentiatedTensor
