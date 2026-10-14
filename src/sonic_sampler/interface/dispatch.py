@@ -242,7 +242,7 @@ class DispatchSummary(Struct):
 
         data_path = (
             resources.files("sonic_sampler")
-            / "resources"
+            / "resources/dispatch"
             / f"sm{cc}_k{k}.toml"
         )
 

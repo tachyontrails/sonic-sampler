@@ -11,7 +11,7 @@ uv pip install sonic-sampler
 ```
 
 Requires Python 3.12+, Triton 3.5.1, and an SM90+ device. The tuned dispatch tables shipped under
-`resources/` cover those architectures.
+`resources/dispatch` cover those architectures.
 
 ## The adoption ladder
 
@@ -99,7 +99,7 @@ unbounded selection path. Leave it at the default.
 `initialize` performs the tuned dispatch lookup and allocates the in-flight buffers:
 
 1. Load the benchmark table for the top-$`k`$ bound and the device architecture, i.e.
-   `resources/sm{90,100}_k128.toml`.
+   `resources/dispatch/sm{90,100}_k128.toml`.
 2. Match a `VocabBucket` against $V$, which fixes the default `block_n` and therefore the number of
    vocabulary tiles.
 3. Allocate the `scratchpad`, plus `values` and `indices` for the verifier, sized to

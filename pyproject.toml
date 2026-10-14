@@ -18,7 +18,7 @@ dependencies = [
 version = { attr = "sonic_sampler.__version__" }
 
 [tool.setuptools.package-data]
-sonic_sampler = ["resources/*.toml"]
+sonic_sampler = ["resources/dispatch/*.toml"]
 
 [build-system]
 requires = ["setuptools", "setuptools-scm"]
