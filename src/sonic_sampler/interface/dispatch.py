@@ -19,9 +19,12 @@ from __future__ import annotations
 import torch
 
 from bisect import bisect_left
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from importlib import resources
 from operator import attrgetter
-from typing import Literal, Type, Any, get_args, get_origin, override
+from typing import Final, Literal, Type, Any, get_args, get_origin, override
 
 from msgspec import Struct, toml, field, convert
 
@@ -29,6 +32,33 @@ from sonic_sampler.ops.base import MAX_K, next_power_of_2
 
 
 Strategy = Literal["bitonic", "adaptive", "radix"]
+
+
+class DispatchContext(Struct):
+
+    # The encapsulated inference vs. benchmark context flag.
+    value: ContextVar[bool] = ContextVar("inference", default=False)
+
+    @property
+    def is_inference(self) -> bool:
+
+        return self.value.get()
+
+    @contextmanager
+    def __call__(self, *, inference: bool = True) -> Iterator[None]:
+
+        token = self.value.set(inference)
+
+        try:
+
+            yield
+
+        finally:
+
+            self.value.reset(token)
+
+
+DISPATCH_CONTEXT: Final[DispatchContext] = DispatchContext()
 
 
 class TwoStageWarpConfig(Struct):
@@ -95,11 +125,6 @@ class SizedBucket(Struct):
     size: int
 
 
-def relaxed_upper(index: int, values: list[int], margin: float, target: int) -> bool:
-
-    return values[index] * (1 + margin) > target
-
-
 class PriorityBucket[T: SizedBucket](list[T]):
 
     def get(self, size: int, margin: float = 0.5) -> T | None:
@@ -115,7 +140,7 @@ class PriorityBucket[T: SizedBucket](list[T]):
             return self[-1]
 
 
-class BatchBucket(SizedBucket):
+class BatchBucket(SizedBucket, omit_defaults=True):
 
     # The priority-ordered list of dispatch configuration(s).
     config: list[RuntimeConfig]
@@ -125,7 +150,9 @@ class BatchBucket(SizedBucket):
 
     def __post_init__(self) -> None:
 
-        self.mapping = {config.strategy: config for config in self.config}
+        if DISPATCH_CONTEXT.is_inference:
+
+            self.mapping = {config.strategy: config for config in self.config}
 
     @property
     def best(self) -> RuntimeConfig:
@@ -202,7 +229,9 @@ class DispatchSummary(Struct):
         return cls.load(k=MAX_K, arch=100)
 
     @classmethod
-    def load(cls, k: int = MAX_K, arch: int | None = None) -> DispatchSummary | None:
+    def load(
+        cls, k: int = MAX_K, arch: int | None = None, inference: bool = True
+    ) -> DispatchSummary | None:
 
         if (cc := arch) is None:
 
@@ -219,4 +248,6 @@ class DispatchSummary(Struct):
 
         if data_path.is_file():
 
-            return toml.decode(data_path.read_bytes(), type=cls, dec_hook=decode_hook)
+            with DISPATCH_CONTEXT(inference=inference):
+
+                return toml.decode(data_path.read_bytes(), type=cls, dec_hook=decode_hook)
