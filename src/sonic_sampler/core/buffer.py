@@ -388,7 +388,7 @@ class TokenCounts(SliceBuffer):
         return TokenCounts(
             context=self.context.index_select(dim=0, index=indices),
             decode=self.decode.index_select(dim=0, index=indices),
-            pinned=self.pinned.index_select(dim=0, index=indices),
+            pinned=self.pinned.narrow(dim=0, start=0, length=indices.size(0)),
             layout=Layout(indices.size(0), self.layout.cols),
         )
 
@@ -555,7 +555,7 @@ class RepetitionPenalties(SliceBuffer):
             frequency=self.frequency.index_select(dim=0, index=indices),
             presence=self.presence.index_select(dim=0, index=indices),
             multiplicative=self.multiplicative.index_select(dim=0, index=indices),
-            pinned=self.pinned.index_select(dim=0, index=indices),
+            pinned=self.pinned.narrow(dim=0, start=0, length=indices.size(0)),
             layout=Layout(indices.size(0), self.layout.cols),
         )
 
@@ -703,15 +703,6 @@ class PinnedRelay(SliceBuffer):
         layout = Layout(size, timesteps)
 
         return cls(bias=bias, float_values=float_values.T, int_values=int_values.T, layout=layout)
-
-    def subset(self, indices: Tensor) -> PinnedRelay:
-
-        return PinnedRelay(
-            bias=self.bias.index_select(dim=0, index=indices),
-            float_values=self.float_values.index_select(dim=0, index=indices),
-            int_values=self.int_values.index_select(dim=0, index=indices),
-            layout=Layout(indices.size(0), self.layout.cols),
-        )
 
     def update_bias(
         self, biases: List[dict[int, float] | None], positions: List[int] | None
@@ -1026,7 +1017,7 @@ class SamplingBuffers(SliceBuffer):
             top_p=self.top_p.index_select(dim=0, index=device_indices),
             min_p=self.min_p.index_select(dim=0, index=device_indices),
             top_logprobs=self.top_logprobs.index_select(dim=0, index=device_indices),
-            pinned=self.pinned.subset(indices=device_indices),
+            pinned=self.pinned[:device_indices.size(0)],
             weights=self.weights.subset(indices=device_indices),
             flags=self.flags.subset(host_indices=host_indices, device_indices=device_indices),
             layout=Layout(len(host_indices), self.layout.cols),
