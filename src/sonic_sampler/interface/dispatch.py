@@ -23,7 +23,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from importlib import resources
+from importlib.resources.abc import Traversable
 from operator import attrgetter
+from pathlib import Path
 from typing import Final, Literal, Type, Any, get_args, get_origin, override
 
 from msgspec import Struct, toml, field, convert
@@ -229,6 +231,13 @@ class DispatchSummary(Struct):
         return cls.load(k=MAX_K, arch=100)
 
     @classmethod
+    def read(cls, path: Path | Traversable, inference: bool = True) -> DispatchSummary:
+
+        with DISPATCH_CONTEXT(inference=inference):
+
+            return toml.decode(path.read_bytes(), type=cls, dec_hook=decode_hook)
+
+    @classmethod
     def load(
         cls, k: int = MAX_K, arch: int | None = None, inference: bool = True
     ) -> DispatchSummary | None:
@@ -248,6 +257,12 @@ class DispatchSummary(Struct):
 
         if data_path.is_file():
 
-            with DISPATCH_CONTEXT(inference=inference):
+            return cls.read(data_path, inference=inference)
 
-                return toml.decode(data_path.read_bytes(), type=cls, dec_hook=decode_hook)
+    def save(self, path: Path | str) -> None:
+
+        (
+            Path(path)
+            .resolve()
+            .write_bytes(toml.encode(self))
+        )
