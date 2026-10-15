@@ -12,13 +12,17 @@ dependencies = [
     "msgspec",
     "cytoolz",
     "tomli_w",
+    "tyro>=1.0",
 ]
+
+[project.optional-dependencies]
+bench = ["rich", "loguru"]
 
 [tool.setuptools.dynamic]
 version = { attr = "sonic_sampler.__version__" }
 
 [tool.setuptools.package-data]
-sonic_sampler = ["resources/dispatch/*.toml"]
+sonic_sampler = ["resources/dispatch/*.toml", "resources/benchmark/*.toml"]
 
 [build-system]
 requires = ["setuptools", "setuptools-scm"]
