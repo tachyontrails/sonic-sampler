@@ -33,7 +33,7 @@ from msgspec import Struct, toml, field, convert
 from sonic_sampler.ops.base import MAX_K, next_power_of_2
 
 
-Strategy = Literal["bitonic", "adaptive", "radix"]
+type Strategy = Literal["bitonic", "adaptive", "radix"]
 
 
 class DispatchContext(Struct):

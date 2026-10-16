@@ -9,7 +9,7 @@ dynamic = ["version"]
 dependencies = [
     "triton>=3.5.1",
     "torch",
-    "msgspec",
+    "msgspec>=0.22.0",
     "cytoolz",
     "tomli_w",
     "tyro>=1.0",
