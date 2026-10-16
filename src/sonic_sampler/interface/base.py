@@ -89,6 +89,11 @@ class TopKStrategy(Struct):
 
                 return cls.adaptive()
 
+    @classmethod
+    def factory(cls) -> dict[Strategy, TopKStrategy]:
+
+        return dict(bitonic=cls(), radix=cls(radix=True), adaptive=cls.adaptive())
+
     @property
     def key(self) -> Strategy:
 
