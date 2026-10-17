@@ -18,9 +18,14 @@ from __future__ import annotations
 
 import torch
 
-from typing import Self, Tuple
+from typing import Any, Self, Tuple
+
+from msgspec import Struct
 
 from torch import Tensor
+
+from triton import JITFunction                  # noqa.
+from triton.compiler import CompiledKernel      # noqa.
 
 from sonic_sampler.interface.base import TwoStageTiling, TopKStrategy
 from sonic_sampler.interface.dispatch import TwoStageWarpConfig
@@ -34,6 +39,30 @@ BF16: torch.dtype = torch.bfloat16
 
 I32: torch.dtype = torch.int32
 U32: torch.dtype = torch.uint32
+
+
+class Launcher(Struct):
+
+    """
+    One kernel launcher: the JIT function, its grid, and its positional arguments.
+
+    """
+
+    # The JIT kernel.
+    kernel: JITFunction
+
+    # The launch grid.
+    grid: tuple[int, ...]
+
+    # The positional kernel argument(s).
+    args: tuple[Any, ...]
+
+    # The warp count.
+    warps: int
+
+    def __call__(self) -> CompiledKernel:
+
+        return self.kernel[self.grid](*self.args, num_warps=self.warps)
 
 
 class UnshardedBoundedTopK(TwoStageTiling):
@@ -95,16 +124,13 @@ class UnshardedBoundedTopK(TwoStageTiling):
 
         return self
 
-    def __call__(
+    def launchers(
         self,
         logits: Tensor,
-        *,
+        n_rows: int,
         strategy: TopKStrategy | None = None,
         tuning: TwoStageWarpConfig | None = None,
-    ) -> Tuple[Tensor, Tensor]:
-
-        *batch_step, _ = logits.shape
-        n_rows = collapse_2d(logits).size(0)
+    ) -> tuple[Launcher, Launcher]:
 
         config, k_strategy, block_n = self.tuning(n_rows, strategy, tuning)
         vocabulary = self.vocabulary.evolve(block_n=block_n)
@@ -117,43 +143,73 @@ class UnshardedBoundedTopK(TwoStageTiling):
         total_cols = block_v * self.k
         vocab_size = vocabulary.size
 
-        bitpacked_reduction_kernel[grid](
-            logits,
-            self.scratchpad,
-            vocab_size,
-            self.k,
-            k_strategy.scale,
-            k_strategy.is_adaptive,
-            k_strategy.radix,
-            self.pdl,
-            logits.stride(0),
-            stride_s,
-            block_n,
-            num_warps=config.first,
+        reduction = Launcher(
+            kernel=bitpacked_reduction_kernel,
+            grid=grid,
+            args=(
+                logits,
+                self.scratchpad,
+                vocab_size,
+                self.k,
+                k_strategy.scale,
+                k_strategy.is_adaptive,
+                k_strategy.radix,
+                self.pdl,
+                logits.stride(0),
+                stride_s,
+                block_n,
+            ),
+            warps=config.first,
         )
 
-        merge_unpack_kernel[(n_rows,)](
-            self.scratchpad,
-            self.values,
-            self.indices,
-            vocab_blocks,
-            None,
-            None,
-            self.k,
-            k_strategy.inverse,
-            None,
-            total_cols,
-            False,
-            k_strategy.is_adaptive,
-            k_strategy.is_alternating,
-            self.pdl,
-            stride_s,
-            None,
-            None,
-            block_n,
-            block_v,
-            num_warps=config.second,
+        merge = Launcher(
+            kernel=merge_unpack_kernel,
+            grid=(n_rows,),
+            args=(
+                self.scratchpad,
+                self.values,
+                self.indices,
+                vocab_blocks,
+                None,
+                None,
+                self.k,
+                k_strategy.inverse,
+                None,
+                total_cols,
+                False,
+                k_strategy.is_adaptive,
+                k_strategy.is_alternating,
+                self.pdl,
+                stride_s,
+                None,
+                None,
+                block_n,
+                block_v,
+            ),
+            warps=config.second,
         )
+
+        return reduction, merge
+
+    def __call__(
+        self,
+        logits: Tensor,
+        *,
+        strategy: TopKStrategy | None = None,
+        tuning: TwoStageWarpConfig | None = None,
+    ) -> Tuple[Tensor, Tensor]:
+
+        *batch_step, _ = logits.shape
+        n_rows = collapse_2d(logits).size(0)
+
+        # Prepare kernel launcher(s).
+
+        reduction, merge = self.launchers(logits, n_rows, strategy, tuning)
+
+        # Execute 2-stage kernel launches.
+
+        reduction()
+        merge()
 
         values = self.values[:n_rows].unflatten(0, batch_step)
         indices = self.indices[:n_rows].unflatten(0, batch_step)
