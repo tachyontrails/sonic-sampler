@@ -171,6 +171,11 @@ class VocabBucket(SizedBucket):
     # The ordered hierarchical batch-wise dispatch configuration(s).
     batch: PriorityBucket[BatchBucket]
 
+    @classmethod
+    def initialize(cls, size: int, batch: Iterator[BatchBucket]) -> VocabBucket:
+
+        return cls(size=size, batch=PriorityBucket(batch))
+
     @property
     def block_n(self) -> int:
 

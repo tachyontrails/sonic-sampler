@@ -52,3 +52,8 @@ def power_of_2_ladder(end: int, ridge: int) -> Iterator[int]:
 def register_budget(warps: int) -> int:
 
     return min(REGISTER_FILE, THREAD_REGISTERS * WARP_SIZE * warps)
+
+
+def nullify(value: str) -> str | None:
+
+    return value or None
