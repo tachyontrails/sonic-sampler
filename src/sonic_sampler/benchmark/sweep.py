@@ -375,6 +375,16 @@ class Bucket(Struct):
 
         return len(self.cases)
 
+    @property
+    def probes(self) -> list[Case]:
+        """
+        Each strategy's median case, i.e. a mid-range vocab block size and warp counts.
+
+        """
+        lanes = groupby(attrgetter("strategy"), self.cases)
+
+        return [cases[len(cases) // 2] for cases in lanes.values()]
+
 
 class Plan(Struct):
 
@@ -430,3 +440,16 @@ class Plan(Struct):
     def size(self) -> int:
 
         return sum(map(attrgetter("size"), self.buckets))
+
+    @property
+    def probes(self) -> list[Case]:
+        """
+        The calibration case(s): each strategy's median case in the lightest and heaviest bucket.
+
+        """
+        key = attrgetter("vocab_size", "batch_size")
+
+        smallest = min(self.buckets, key=key).probes
+        largest = max(self.buckets, key=key).probes
+
+        return list(unique(chain(smallest, largest)))

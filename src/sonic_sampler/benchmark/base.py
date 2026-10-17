@@ -16,8 +16,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from itertools import chain
+from statistics import median
 from typing import Final
 
 
@@ -57,3 +58,8 @@ def register_budget(warps: int) -> int:
 def nullify(value: str) -> str | None:
 
     return value or None
+
+
+def relative_range(values: Sequence[float]) -> float:
+
+    return (max(values) - min(values)) / median(values)

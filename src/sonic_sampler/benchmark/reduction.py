@@ -261,6 +261,11 @@ class Reduction(Struct):
 
         return sorted(filter(is_multi_version(versions), packages))
 
+    @property
+    def is_multi_timer(self) -> bool:
+
+        return len({run.manifest.timer for run in self.runs}) > 1
+
     def limits(self, record: Record) -> Limits:
 
         origin = self.origins[record.case]

@@ -30,6 +30,7 @@ from msgspec import Struct, convert, structs, toml
 
 from sonic_sampler.benchmark.base import nullify
 from sonic_sampler.benchmark.sweep import Case, Limits, Sweep
+from sonic_sampler.benchmark.timing import Calibration, GraphTimer
 
 
 type Status = Literal["ok", "invalid", "failed"]
@@ -188,7 +189,7 @@ class RecordSink(Struct):
         self.handle.flush()
 
 
-class Manifest(Struct):
+class Manifest(Struct, omit_defaults=True):
 
     # The manifest format version.
     version: int
@@ -208,9 +209,22 @@ class Manifest(Struct):
     # The limits applied to the sweep.
     limits: Limits
 
+    # The timer settings every case was measured with.
+    timer: GraphTimer
+
+    # The calibration that chose the timer's unroll and replay counts, unless given.
+    calibration: Calibration | None = None
+
     @classmethod
     def initialize(
-        cls, start: datetime, arch: int, versions: dict[str, str], sweep: Sweep, limits: Limits
+        cls,
+        start: datetime,
+        arch: int,
+        versions: dict[str, str],
+        sweep: Sweep,
+        limits: Limits,
+        timer: GraphTimer,
+        calibration: Calibration | None = None,
     ) -> Manifest:
 
         resolved = structs.replace(sweep, max_blocks=limits.requested)
@@ -222,6 +236,8 @@ class Manifest(Struct):
             versions=versions,
             sweep=resolved,
             limits=limits,
+            timer=timer,
+            calibration=calibration,
         )
 
     @classmethod
