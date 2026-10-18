@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from itertools import chain, pairwise
 from operator import attrgetter
 from typing import Final, Literal
@@ -64,8 +65,13 @@ def is_multi_version(versions: list[dict[str, str]], package: str) -> bool:
 class NearTie(Struct):
 
     """
-    Two records whose latency spreads overlap: the faster one's 90th percentile reaches the slower
-    one's 10th percentile.
+    Two records too close to rank with confidence: the slower one's margin lies within the
+    dispersion of the runs that timed them, or their latency spreads overlap.
+
+    Note(s):
+
+        • The calibrated dispersion measures how far one capture's median moves across captures,
+          the larger part of the noise, while a record's p10/p90 spread covers one capture alone.
 
     """
 
@@ -75,10 +81,18 @@ class NearTie(Struct):
     # The slower record.
     slower: Record
 
+    # The dispersion the margin is judged against: the larger of the two records' runs.
+    dispersion: float
+
     @property
     def margin(self) -> float:
 
         return (self.slower.median_us / self.faster.median_us) - 1
+
+    @property
+    def is_close(self) -> bool:
+
+        return self.margin <= self.dispersion or self.faster.tail_overlap(self.slower)
 
 
 class Finding(Struct):
@@ -152,13 +166,21 @@ class Standing(Struct):
 
         return BatchBucket(size=self.batch_size, config=configs)
 
-    @property
-    def near_ties(self) -> list[NearTie]:
+    def near_ties(self, dispersion: Callable[[Record], float]) -> list[NearTie]:
+        """
+        The close pairs among adjacent winners and each strategy's two fastest records, judged
+        against the dispersion of the run behind each record.
 
+        """
         runners = (records[:2] for records in self.entries.values() if len(records) > 1)
         pairs = chain(pairwise(self.winners), runners)
 
-        return [NearTie(faster, slower) for faster, slower in pairs if faster.tail_overlap(slower)]
+        ties = (
+            NearTie(faster, slower, dispersion=max(dispersion(faster), dispersion(slower)))
+            for faster, slower in pairs
+        )
+
+        return list(filter(attrgetter("is_close"), ties))
 
 
 class Reduction(Struct):
@@ -173,6 +195,9 @@ class Reduction(Struct):
 
         • Each surviving record is audited against the limits of the run that produced it.
 
+        • Standings may lack a strategy while a run is in progress, so only the summary demands
+          every bucket complete.
+
     """
 
     # The merged run(s), oldest first.
@@ -183,14 +208,6 @@ class Reduction(Struct):
 
     # The per-bucket standing(s), ordered by vocabulary then batch size.
     standings: list[Standing]
-
-    def __post_init__(self) -> None:
-
-        if gaps := list(filter(attrgetter("is_incomplete"), self.standings)):
-
-            buckets = list(map(attrgetter("vocab_size", "batch_size"), gaps))
-
-            raise ValueError(f"bucket(s) {buckets} lack a measured case for some strategy")
 
     @classmethod
     def initialize(cls, runs: list[RunDirectory]) -> Reduction:
@@ -226,24 +243,41 @@ class Reduction(Struct):
         return self.runs[-1]
 
     @property
+    def gaps(self) -> list[Standing]:
+
+        return list(filter(attrgetter("is_incomplete"), self.standings))
+
+    @property
     def summary(self) -> DispatchSummary:
 
-        bands = groupby(attrgetter("vocab_size"), self.standings)
+        if gaps := self.gaps:
 
-        vocab = PriorityBucket(
-            VocabBucket.initialize(size=size, batch=map(attrgetter("bucket"), standings))
-            for size, standings in bands.items()
-        )
+            buckets = list(map(attrgetter("vocab_size", "batch_size"), gaps))
 
-        manifest = self.latest.manifest
-        metadata = DispatchMetadata(version=DISPATCH_VERSION, timestamp=manifest.start.isoformat())
+            raise ValueError(f"bucket(s) {buckets} lack a measured case for some strategy")
 
-        return DispatchSummary(metadata=metadata, k=manifest.sweep.k, vocab=vocab)
+        else:
+
+            bands = groupby(attrgetter("vocab_size"), self.standings)
+
+            vocab = PriorityBucket(
+                VocabBucket.initialize(size=size, batch=map(attrgetter("bucket"), standings))
+                for size, standings in bands.items()
+            )
+
+            manifest = self.latest.manifest
+            stamp = manifest.start.isoformat()
+
+            metadata = DispatchMetadata(version=DISPATCH_VERSION, timestamp=stamp)
+
+            return DispatchSummary(metadata=metadata, k=manifest.sweep.k, vocab=vocab)
 
     @property
     def near_ties(self) -> list[NearTie]:
 
-        return list(chain.from_iterable(map(attrgetter("near_ties"), self.standings)))
+        ties = (standing.near_ties(self.dispersion) for standing in self.standings)
+
+        return list(chain.from_iterable(ties))
 
     @property
     def findings(self) -> list[Finding]:
@@ -266,8 +300,14 @@ class Reduction(Struct):
 
         return len({run.manifest.timer for run in self.runs}) > 1
 
+    def origin(self, record: Record) -> RunDirectory:
+
+        return self.runs[self.origins[record.case]]
+
     def limits(self, record: Record) -> Limits:
 
-        origin = self.origins[record.case]
+        return self.origin(record).manifest.limits
 
-        return self.runs[origin].manifest.limits
+    def dispersion(self, record: Record) -> float:
+
+        return self.origin(record).manifest.dispersion

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from cytoolz.dicttoolz import valmap
+from cytoolz.itertoolz import groupby
 from msgspec import Struct, convert, structs, to_builtins, toml
 
 from triton.compiler import CompiledKernel      # noqa.
@@ -74,6 +75,16 @@ def load_rows[T: Struct](path: Path, schema: type[T]) -> list[T]:
         rows = map(partial(valmap, nullify), DictReader(handle))
 
         return [convert(row, type=schema, strict=False) for row in rows]
+
+
+def since_start(heartbeats: list[Heartbeat]) -> list[Heartbeat]:
+    """
+    The heartbeats of the latest timing process: from its start beat on.
+
+    """
+    starts = [index for index, beat in enumerate(heartbeats) if beat.phase == "start"]
+
+    return heartbeats[starts[-1]:] if starts else []
 
 
 def save_rows[T: Struct](path: Path, schema: type[T], rows: Iterable[T]) -> None:
@@ -347,6 +358,20 @@ class Drift(Struct):
 
         return (self.end.median_us / self.start.median_us) - 1
 
+    @classmethod
+    def from_heartbeats(cls, heartbeats: list[Heartbeat]) -> list[Drift]:
+        """
+        Each GPU's drift so far, from its latest process's start beat to that process's last beat.
+
+        """
+        series = groupby(attrgetter("device"), heartbeats)
+        latest = valmap(since_start, series)
+
+        return [
+            cls(device=device, start=beats[0], end=beats[-1])
+            for device, beats in sorted(latest.items()) if len(beats) > 1
+        ]
+
     def exceeds(self, tolerance: float) -> bool:
 
         return abs(self.change) > tolerance
@@ -473,6 +498,26 @@ class Manifest(Struct, omit_defaults=True):
 
         return f"sm{self.arch}_k{self.sweep.k}"
 
+    @property
+    def dispersion(self) -> float:
+        """
+        The repeatability of the run's timings: the calibrated dispersion, or the tolerance when
+        the timer was given.
+
+        """
+        if (calibration := self.calibration) is None:
+
+            return self.tolerance
+
+        else:
+
+            return calibration.choice.dispersion
+
+    @property
+    def has_finished(self) -> bool:
+
+        return self.completion is not None
+
     def save(self, path: Path) -> None:
 
         path.write_bytes(toml.encode(self))
@@ -489,13 +534,23 @@ class RunDirectory(Struct):
     # The run's record(s), in write order.
     records: RecordLog
 
+    # The run's heartbeat(s), in write order.
+    heartbeats: list[Heartbeat]
+
     @classmethod
     def load(cls, path: Path) -> RunDirectory:
+        """
+        Loads a run at any stage after calibration: before timing starts it has no records or
+        heartbeats yet.
 
+        """
         manifest = Manifest.load(path / MANIFEST)
-        records = RecordLog.load(path / RECORDS)
+        records = RecordLog.load(log) if (log := path / RECORDS).exists() else RecordLog()
 
-        return cls(path=path, manifest=manifest, records=records)
+        beats = path / HEARTBEATS
+        heartbeats = load_rows(beats, Heartbeat) if beats.exists() else []
+
+        return cls(path=path, manifest=manifest, records=records, heartbeats=heartbeats)
 
     @property
     def table(self) -> Path:

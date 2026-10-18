@@ -18,6 +18,9 @@ dependencies = [
 [project.optional-dependencies]
 bench = ["rich", "loguru", "nvidia-ml-py"]
 
+[project.scripts]
+sonic-sampler = "sonic_sampler.cli:main"
+
 [tool.setuptools.dynamic]
 version = { attr = "sonic_sampler.__version__" }
 
