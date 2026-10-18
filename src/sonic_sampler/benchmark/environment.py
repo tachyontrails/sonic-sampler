@@ -28,12 +28,33 @@ from msgspec import Struct
 from pynvml import (
     NVML_CLOCK_MEM,
     NVML_CLOCK_SM,
+    NVML_FI_DEV_CLOCKS_EVENT_REASON_HW_POWER_BRAKE_SLOWDOWN,
+    NVML_FI_DEV_CLOCKS_EVENT_REASON_HW_THERM_SLOWDOWN,
+    NVML_FI_DEV_CLOCKS_EVENT_REASON_SW_POWER_CAP,
+    NVML_FI_DEV_CLOCKS_EVENT_REASON_SW_THERM_SLOWDOWN,
+    NVML_FI_DEV_MEMORY_TEMP,
+    NVML_SUCCESS,
+    NVML_TEMPERATURE_GPU,
+    NVML_VALUE_TYPE_DOUBLE,
+    NVML_VALUE_TYPE_SIGNED_INT,
+    NVML_VALUE_TYPE_SIGNED_LONG_LONG,
+    NVML_VALUE_TYPE_UNSIGNED_INT,
+    NVML_VALUE_TYPE_UNSIGNED_LONG,
+    NVML_VALUE_TYPE_UNSIGNED_LONG_LONG,
+    NVML_VALUE_TYPE_UNSIGNED_SHORT,
+    c_nvmlFieldValue_t,
     nvmlDeviceGetClockInfo,
     nvmlDeviceGetCount,
     nvmlDeviceGetCpuAffinity,
+    nvmlDeviceGetEnforcedPowerLimit,
+    nvmlDeviceGetFieldValues,
     nvmlDeviceGetHandleByIndex,
     nvmlDeviceGetMaxClockInfo,
     nvmlDeviceGetName,
+    nvmlDeviceGetPowerManagementDefaultLimit,
+    nvmlDeviceGetPowerUsage,
+    nvmlDeviceGetTemperature,
+    nvmlDeviceGetTotalEnergyConsumption,
     nvmlDeviceGetUUID,
     nvmlInit,
     nvmlShutdown,
@@ -49,6 +70,29 @@ from sonic_sampler import __version__
 # The CPUs per word of an NVML CPU affinity mask.
 MASK_BITS: Final[int] = 64
 
+# The milliwatts per watt, the unit of NVML power readings.
+MILLIWATTS: Final[int] = 1_000
+
+# The member of an NVML field value that holds each value type.
+MEMBERS: Final[dict[int, str]] = {
+    NVML_VALUE_TYPE_DOUBLE: "dVal",
+    NVML_VALUE_TYPE_UNSIGNED_INT: "uiVal",
+    NVML_VALUE_TYPE_UNSIGNED_LONG: "ulVal",
+    NVML_VALUE_TYPE_UNSIGNED_LONG_LONG: "ullVal",
+    NVML_VALUE_TYPE_SIGNED_LONG_LONG: "sllVal",
+    NVML_VALUE_TYPE_SIGNED_INT: "siVal",
+    NVML_VALUE_TYPE_UNSIGNED_SHORT: "usVal",
+}
+
+# The NVML fields a telemetry reading takes, by the `Telemetry` field each one fills.
+FIELDS: Final[dict[str, int]] = {
+    "memory_temp": NVML_FI_DEV_MEMORY_TEMP,
+    "power_capping_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_SW_POWER_CAP,
+    "thermal_slowdown_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_SW_THERM_SLOWDOWN,
+    "hw_thermal_slowdown_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_HW_THERM_SLOWDOWN,
+    "power_braking_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_HW_POWER_BRAKE_SLOWDOWN,
+}
+
 
 @contextmanager
 def nvml() -> Iterator[None]:
@@ -62,6 +106,20 @@ def nvml() -> Iterator[None]:
     finally:
 
         nvmlShutdown()
+
+
+def field_value(field: c_nvmlFieldValue_t) -> int | float | None:
+    """
+    The value of one NVML field, or none when the GPU does not report it.
+
+    """
+    if field.nvmlReturn != NVML_SUCCESS:
+
+        return None
+
+    else:
+
+        return getattr(field.value, MEMBERS[field.valueType])
 
 
 def visible_devices() -> tuple[int, ...]:
@@ -174,6 +232,12 @@ class Device(Struct):
     # The maximum SM clock, in MHz.
     max_sm_clock: int
 
+    # The enforced power limit, in W.
+    power_limit: float
+
+    # The default power limit, in W.
+    default_power_limit: float
+
     @classmethod
     def probe(cls, index: int) -> Device:
         """
@@ -193,6 +257,9 @@ class Device(Struct):
 
             max_sm_clock = nvmlDeviceGetMaxClockInfo(handle, NVML_CLOCK_SM)
 
+            power_limit = nvmlDeviceGetEnforcedPowerLimit(handle) / MILLIWATTS
+            default_power_limit = nvmlDeviceGetPowerManagementDefaultLimit(handle) / MILLIWATTS
+
         return cls(
             index=index,
             name=name,
@@ -203,6 +270,8 @@ class Device(Struct):
             sm_clock=sm_clock,
             memory_clock=memory_clock,
             max_sm_clock=max_sm_clock,
+            power_limit=power_limit,
+            default_power_limit=default_power_limit,
         )
 
     @property
@@ -213,3 +282,62 @@ class Device(Struct):
 
         """
         return self.arch, self.shared_memory
+
+
+class Telemetry(Struct, kw_only=True, omit_defaults=True):
+
+    """
+    The state of one GPU at one instant: its SM clock, temperatures, power, and the time its
+    clocks have been held back, by reason.
+
+    Note(s):
+
+        • The energy and the held-back times accumulate from when the driver loaded, so only the
+          difference between two readings is meaningful.
+
+        • A field the GPU does not report is left out.
+
+    """
+
+    # The SM clock, in MHz.
+    sm_clock: int
+
+    # The GPU temperature, in °C.
+    gpu_temp: int
+
+    # The power draw averaged over the last second, in W.
+    power: float
+
+    # The energy consumed, in mJ.
+    energy: int
+
+    # The memory temperature, in °C.
+    memory_temp: int | None = None
+
+    # The time the clocks were held back to stay within the power limit, in ns.
+    power_capping_ns: int | None = None
+
+    # The time the clocks were held back to stay within the temperature limits, in ns.
+    thermal_slowdown_ns: int | None = None
+
+    # The time the clocks were at least halved by an over-temperature, in ns.
+    hw_thermal_slowdown_ns: int | None = None
+
+    # The time the clocks were at least halved by an external power brake, in ns.
+    power_braking_ns: int | None = None
+
+    @classmethod
+    def probe(cls, index: int) -> Telemetry:
+
+        with nvml():
+
+            handle = nvmlDeviceGetHandleByIndex(index)
+            values = nvmlDeviceGetFieldValues(handle, list(FIELDS.values()))
+
+            return cls(
+                sm_clock=nvmlDeviceGetClockInfo(handle, NVML_CLOCK_SM),
+                gpu_temp=nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU),
+                power=nvmlDeviceGetPowerUsage(handle) / MILLIWATTS,
+                energy=nvmlDeviceGetTotalEnergyConsumption(handle),
+                **dict(zip(FIELDS, map(field_value, values))),
+            )

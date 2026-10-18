@@ -22,24 +22,32 @@ from collections.abc import Iterator
 from contextlib import suppress
 from functools import partial
 from multiprocessing.queues import Queue
-from typing import Literal
+from time import monotonic
+from typing import Final
 
-from msgspec import Struct, field
+from msgspec import Struct, field, structs
 
 from torch import Tensor
+from torch.cuda import CUDAGraph
 
 from triton import OutOfResources               # noqa.
 
 from sonic_sampler.benchmark.base import derive_seed
-from sonic_sampler.benchmark.environment import Device, pin
+from sonic_sampler.benchmark.environment import Device, Telemetry, nvml, pin
 from sonic_sampler.benchmark.logits import LogitsFactory
-from sonic_sampler.benchmark.records import Record
+from sonic_sampler.benchmark.records import Heartbeat, Phase, Record
 from sonic_sampler.benchmark.sweep import STRATEGIES, Axis, Bucket, Case, CompileUnit, Group, Sweep
-from sonic_sampler.benchmark.timing import Calibration, GraphTimer, Probe, Timing
+from sonic_sampler.benchmark.timing import Calibration, GraphTimer, Probe, Series, Timing
 from sonic_sampler.interface.topk import UnshardedBoundedTopK
 
 
-type Phase = Literal["start", "end"]
+# The seconds a timing process replays its drift reference before its first heartbeat, so that
+# timing starts on a GPU under load rather than one just out of idle.
+SOAK_SECONDS: Final[float] = 5.0
+
+# The timed replays of a heartbeat at least, more than a case takes, so that a beat's noise stays
+# below the drift tolerance.
+BEAT_REPLAYS: Final[int] = 20
 
 
 class Message(Struct):
@@ -59,6 +67,9 @@ class Calibrated(Message):
     # The calibration over the plan's probes.
     calibration: Calibration
 
+    # The timed replays the calibration was scored from.
+    series: list[Series]
+
 
 class Measured(Message):
 
@@ -66,16 +77,10 @@ class Measured(Message):
     record: Record
 
 
-class Referenced(Message):
+class Beat(Message):
 
-    # The NVML index of the worker's GPU.
-    device: int
-
-    # Whether the reference was timed before or after the worker's buckets.
-    phase: Phase
-
-    # The reference timing.
-    timing: Timing
+    # The heartbeat of the worker's GPU.
+    heartbeat: Heartbeat
 
 
 class Started(Message):
@@ -207,11 +212,82 @@ class Workbench(Struct):
 
             return Record.measured(case, device, timing, first, second)
 
-    def reference(self, case: Case, timer: GraphTimer) -> Timing:
 
-        logits = self.logits(case.vocab_size, case.batch_size)
+class Reference(Struct):
 
-        return timer(self.probe(case, logits))
+    """
+    The drift reference of one timing process: one case's graph, captured once and replayed for
+    every heartbeat, so that its timings differ only by when they were taken.
+
+    Note(s):
+
+        • The logits are held with the graph, which reads them by address, and each capture empties
+          the allocator's cache, so logits sampled anew would land elsewhere in memory.
+
+        • A heartbeat times at least `BEAT_REPLAYS` replays, whatever the replays of a case.
+
+    """
+
+    # The NVML index of the process's GPU.
+    device: int
+
+    # The logits the graph reads.
+    logits: Tensor
+
+    # The captured graph.
+    graph: CUDAGraph
+
+    # The timer that captured the graph and times its replays.
+    timer: GraphTimer
+
+    # The seconds between heartbeats.
+    interval: float
+
+    # The monotonic time of the last heartbeat.
+    last: float = 0.0
+
+    @classmethod
+    def capture(
+        cls, bench: Workbench, case: Case, timer: GraphTimer, device: int, interval: float
+    ) -> Reference:
+
+        logits = bench.logits(case.vocab_size, case.batch_size)
+        graph = timer.capture(bench.probe(case, logits))
+
+        beats = structs.replace(timer, replays=max(timer.replays, BEAT_REPLAYS))
+
+        return cls(device=device, logits=logits, graph=graph, timer=beats, interval=interval)
+
+    def soak(self, seconds: float) -> None:
+        """
+        Replays the graph untimed for the given seconds, one replay at a time, so that the GPU
+        stays under load throughout without the replays queueing ahead of it.
+
+        """
+        deadline = monotonic() + seconds
+
+        while monotonic() < deadline:
+
+            self.graph.replay()
+            torch.cuda.synchronize()
+
+    @property
+    def is_due(self) -> bool:
+
+        return (monotonic() - self.last) >= self.interval
+
+    def beat(self, phase: Phase) -> Heartbeat:
+        """
+        Times the graph, then reads the GPU's telemetry, which counts any clock event since the
+        previous beat.
+
+        """
+        timing = Timing.initialize(self.timer.replay(self.graph))
+        telemetry = Telemetry.probe(self.device)
+
+        self.last = monotonic()
+
+        return Heartbeat.initialize(self.device, phase, timing, telemetry)
 
 
 class Worker(Struct):
@@ -261,20 +337,30 @@ class Worker(Struct):
             self.bench.compile(unit)
 
     def calibrate(
-        self, cases: list[Case], warmup: int, tolerance: float, unrolls: Axis, replays: Axis
+        self,
+        cases: list[Case],
+        warmup: int,
+        tolerance: float,
+        unrolls: Axis,
+        replays: Axis,
+        repeats: int,
     ) -> None:
 
-        calibration = Calibration.measure(
-            probes=self.bench.batched(cases),
-            warmup=warmup,
-            tolerance=tolerance,
-            unrolls=unrolls,
-            replays=replays,
-        )
+        probes = self.bench.batched(cases)
+        series = Series.sample(probes, warmup, unrolls, replays, repeats)
 
-        self.results.put(Calibrated(slot=self.slot, calibration=calibration))
+        calibration = Calibration.initialize(series, replays, tolerance)
+        message = Calibrated(slot=self.slot, calibration=calibration, series=series)
 
-    def time(self, bucket: Bucket, timer: GraphTimer) -> None:
+        self.results.put(message)
+
+    def beat(self, reference: Reference, phase: Phase) -> None:
+
+        heartbeat = reference.beat(phase)
+
+        self.results.put(Beat(slot=self.slot, heartbeat=heartbeat))
+
+    def time(self, bucket: Bucket, timer: GraphTimer, reference: Reference) -> None:
 
         logits = self.bench.logits(bucket.vocab_size, bucket.batch_size)
 
@@ -288,22 +374,29 @@ class Worker(Struct):
 
             torch.cuda.synchronize()
 
-    def reference(self, phase: Phase, case: Case, timer: GraphTimer) -> None:
+            if reference.is_due:
 
-        timing = self.bench.reference(case, timer)
-        message = Referenced(slot=self.slot, device=self.device, phase=phase, timing=timing)
+                self.beat(reference, "beat")
 
-        self.results.put(message)
+    def measure(
+        self, queue: Queue[Bucket | None], timer: GraphTimer, case: Case, interval: float
+    ) -> None:
 
-    def measure(self, queue: Queue[Bucket | None], timer: GraphTimer, reference: Case) -> None:
+        # NVML stays loaded for the process's lifetime, so each heartbeat reads it at no setup.
 
-        self.reference("start", reference, timer)
+        with nvml():
 
-        for bucket in self.tasks(queue):
+            reference = Reference.capture(self.bench, case, timer, self.device, interval)
 
-            self.time(bucket, timer)
+            reference.soak(SOAK_SECONDS)
 
-        self.reference("end", reference, timer)
+            self.beat(reference, "start")
+
+            for bucket in self.tasks(queue):
+
+                self.time(bucket, timer, reference)
+
+            self.beat(reference, "end")
 
 
 def probe_device(slot: int, device: int, results: Queue[Message]) -> None:
@@ -337,11 +430,12 @@ def calibrate_timer(
     tolerance: float,
     unrolls: Axis,
     replays: Axis,
+    repeats: int,
 ) -> None:
 
     (
         Worker.initialize(slot, device, results, sweep)
-        .calibrate(cases, warmup, tolerance, unrolls, replays)
+        .calibrate(cases, warmup, tolerance, unrolls, replays, repeats)
     )
 
 
@@ -353,9 +447,10 @@ def measure_buckets(
     sweep: Sweep,
     timer: GraphTimer,
     reference: Case,
+    interval: float,
 ) -> None:
 
     (
         Worker.initialize(slot, device, results, sweep)
-        .measure(queue, timer, reference)
+        .measure(queue, timer, reference, interval)
     )

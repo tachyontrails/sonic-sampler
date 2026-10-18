@@ -24,7 +24,7 @@ from itertools import chain
 from multiprocessing import get_context
 from multiprocessing.context import SpawnContext, SpawnProcess      # noqa.
 from multiprocessing.queues import Queue
-from operator import attrgetter
+from operator import attrgetter, methodcaller
 from pathlib import Path
 from queue import Empty
 from typing import Annotated, Any, Final, Never, override
@@ -35,31 +35,37 @@ from tyro.conf import arg
 
 from sonic_sampler.benchmark.environment import Device, versions, visible_devices
 from sonic_sampler.benchmark.records import (
+    CALIBRATION,
+    HEARTBEATS,
     MANIFEST,
     RECORDS,
     Completion,
     Drift,
+    Heartbeat,
     Manifest,
     Record,
     RecordLog,
-    RecordSink,
+    RowSink,
+    Sample,
+    save_rows,
 )
 from sonic_sampler.benchmark.sweep import Axis, Bucket, Case, CompileUnit, Limits, Plan, Sweep
 from sonic_sampler.benchmark.timing import (
+    REPEATS,
     REPLAYS,
     TOLERANCE,
     UNROLLS,
     Calibration,
     GraphTimer,
-    Timing,
+    Series,
 )
 from sonic_sampler.benchmark.worker import (
+    Beat,
     Calibrated,
     Done,
     Measured,
     Message,
     Probed,
-    Referenced,
     Started,
     calibrate_timer,
     compile_units,
@@ -77,6 +83,9 @@ FLUSH_SECONDS: Final[float] = 0.1
 
 # The consecutive restarts a server may take without its worker taking up a task.
 MAX_RESTARTS: Final[int] = 3
+
+# The default seconds between heartbeats while timing.
+HEARTBEAT: Final[float] = 5.0
 
 
 class RunError(Exception):
@@ -166,6 +175,9 @@ class Options(Struct):
     # The tolerance on calibrated dispersion and on drift.
     tolerance: float = TOLERANCE
 
+    # The seconds between heartbeats while timing.
+    heartbeat: float = HEARTBEAT
+
     def __post_init__(self) -> None:
 
         if self.jobs < 1:
@@ -179,6 +191,10 @@ class Options(Struct):
         elif not 0 < self.tolerance < 1:
 
             raise ValueError(f"tolerance must lie in (0, 1), got {self.tolerance} instead")
+
+        elif self.heartbeat <= 0:
+
+            raise ValueError(f"heartbeat must be positive, got {self.heartbeat} instead")
 
     @property
     def timer(self) -> GraphTimer | None:
@@ -532,12 +548,22 @@ class Preparation(Phase[CompileUnit]):
     # The calibration, once reported.
     calibration: Calibration | None = None
 
+    # The timed replays the calibration was scored from, once reported.
+    series: list[Series] = field(default_factory=list)
+
     @override
     def observe(self, message: Message) -> None:
 
         if isinstance(message, Calibrated):
 
-            self.calibration = message.calibration
+            self.calibration, self.series = message.calibration, message.series
+
+    def samples(self, probes: list[Case]) -> Iterator[Sample]:
+        """
+        Every timed replay of the calibration, as rows.
+
+        """
+        return chain.from_iterable(Sample.from_series(s, probes[s.probe]) for s in self.series)
 
     @override
     def recover(self, server: Server[CompileUnit]) -> list[CompileUnit]:
@@ -559,8 +585,22 @@ class Preparation(Phase[CompileUnit]):
 
 class Measurement(Phase[Bucket]):
 
+    """
+    The bookkeeping of the timing pool: records and heartbeats as they arrive, and what becomes of
+    a crashed worker's bucket.
+
+    Note(s):
+
+        • Every case of a bucket is timed by one process, so a bucket that a crashed worker had
+          taken up is timed again in full by its replacement, except the case that crashed it.
+
+    """
+
     # The record sink of the run.
-    sink: RecordSink
+    records: RowSink[Record]
+
+    # The heartbeat sink of the run.
+    heartbeats: RowSink[Heartbeat]
 
     # The bucket(s) to time.
     buckets: int
@@ -568,14 +608,14 @@ class Measurement(Phase[Bucket]):
     # The bucket(s) timed so far.
     finished: int = 0
 
-    # The case(s) recorded by this attempt.
-    recorded: set[Case] = field(default_factory=set)
+    # The record(s) of each worker's current bucket, by slot.
+    attempts: dict[int, list[Record]] = field(default_factory=dict)
 
-    # The first drift reference timing per GPU.
-    starts: dict[int, Timing] = field(default_factory=dict)
+    # The first heartbeat of each GPU's latest timing process.
+    starts: dict[int, Heartbeat] = field(default_factory=dict)
 
-    # The last drift reference timing per GPU.
-    ends: dict[int, Timing] = field(default_factory=dict)
+    # The last heartbeat of each GPU's latest timing process.
+    ends: dict[int, Heartbeat] = field(default_factory=dict)
 
     @property
     def drifts(self) -> list[Drift]:
@@ -589,57 +629,106 @@ class Measurement(Phase[Bucket]):
 
         return matched
 
-    def record(self, record: Record) -> None:
+    def finish(self) -> None:
 
-        self.sink(record)
-        self.recorded.add(record.case)
+        self.finished += 1
+
+        logger.info("timed {}/{} bucket(s)", self.finished, self.buckets)
+
+    def beat(self, heartbeat: Heartbeat) -> None:
+
+        self.heartbeats(heartbeat)
+
+        # A replacement process captures its own reference graph, so its drift starts afresh.
+
+        match heartbeat.phase:
+
+            case "start":
+
+                self.starts[heartbeat.device] = heartbeat
+
+            case "end":
+
+                self.ends[heartbeat.device] = heartbeat
+
+    def blame(self, server: Server[Bucket], bucket: Bucket) -> Case | None:
+        """
+        The case that ended the worker's process, recorded as failed unless its own record says
+        so already, or none when the worker timed every case of its bucket.
+
+        Note(s):
+
+            • A failed last record means its case left the CUDA context unusable, so the process
+              exited on synchronizing after it. Otherwise it exited timing the next case.
+
+        """
+        records = self.attempts[server.index]
+        cases = bucket.cases
+
+        if records and not records[-1].is_viable:
+
+            return cases[len(records) - 1]
+
+        elif len(records) < len(cases):
+
+            culprit, code = cases[len(records)], server.exit_code
+
+            error = WorkerExited(f"worker on GPU {server.device} exited with code {code}")
+            self.records(Record.failed(culprit, server.device, error))
+
+            return culprit
+
+        else:
+
+            return None
 
     @override
     def observe(self, message: Message) -> None:
 
         match message:
 
-            case Measured(record=record):
+            case Started(slot=slot):
 
-                self.record(record)
+                self.attempts[slot] = []
 
-            case Referenced(device=device, phase="start", timing=timing):
+            case Measured(slot=slot, record=record):
 
-                self.starts.setdefault(device, timing)
+                self.records(record)
+                self.attempts[slot].append(record)
 
-            case Referenced(device=device, phase="end", timing=timing):
+            case Beat(heartbeat=heartbeat):
 
-                self.ends[device] = timing
+                self.beat(heartbeat)
 
             case Done():
 
-                self.finished += 1
-
-                logger.info("timed {}/{} bucket(s)", self.finished, self.buckets)
+                self.finish()
 
     @override
     def recover(self, server: Server[Bucket]) -> list[Bucket]:
 
-        if (bucket := server.task) is None or not (cases := bucket.remaining(self.recorded).cases):
+        if (bucket := server.task) is None:
 
             return []
 
         elif not server.started:
 
-            return [structs.replace(bucket, cases=cases)]
+            return [bucket]
+
+        elif (culprit := self.blame(server, bucket)) is None or bucket.cases == [culprit]:
+
+            self.finish()
+
+            return []
 
         else:
 
-            # The first unrecorded case is the one the worker was timing, so it is recorded as
-            # failed, and the rest of the bucket is requeued ahead of every other bucket.
+            # The bucket is requeued ahead of every other bucket, and its replacement times it
+            # again in full, except the culprit.
 
-            case, *rest = cases
-            code = server.exit_code
+            rest = [case for case in bucket.cases if case != culprit]
 
-            error = WorkerExited(f"worker on GPU {server.device} exited with code {code}")
-            self.record(Record.failed(case, server.device, error))
-
-            return [structs.replace(bucket, cases=rest)] if rest else []
+            return [structs.replace(bucket, cases=rest)]
 
 
 def survey(gpus: tuple[int, ...]) -> list[Device]:
@@ -721,8 +810,8 @@ class Runner(Struct):
     @classmethod
     def resume(cls, directory: Path, options: Options) -> Runner:
         """
-        Resumes the run in the directory with its own sweep, timer, and tolerance: only the GPUs
-        and compile jobs of the given options apply.
+        Resumes the run in the directory with its own sweep, timer, and tolerance: only the GPUs,
+        compile jobs, and heartbeat of the given options apply.
 
         """
         if not (path := directory / MANIFEST).exists():
@@ -759,7 +848,7 @@ class Runner(Struct):
     def calibrator(self, index: int, gpu: int, cases: list[Case]) -> Placement:
 
         grids = ((options := self.options).unroll_grid, options.replay_grid)
-        args = (self.sweep, cases, options.warmup, options.tolerance, *grids)
+        args = (self.sweep, cases, options.warmup, options.tolerance, *grids, REPEATS)
 
         return Placement(index=index, device=gpu, target=calibrate_timer, args=args)
 
@@ -822,6 +911,10 @@ class Runner(Struct):
 
                 logger.info(message, calibration.choice, calibration.has_converged)
 
+                # Every timed replay is kept, so the calibration can be scored again offline.
+
+                save_rows(self.directory / CALIBRATION, Sample, preparation.samples(plan.probes))
+
             if not others:
 
                 with Pool.start(self.compilers(gpus, units), units) as pool:
@@ -834,17 +927,20 @@ class Runner(Struct):
         self, plan: Plan, gpus: list[int], buckets: list[Bucket], timer: GraphTimer
     ) -> list[Drift]:
 
-        args = (self.sweep, timer, plan.reference)
+        args = (self.sweep, timer, plan.reference, self.options.heartbeat)
         timers = Placement.distribute(gpus=gpus, target=measure_buckets, args=args)
 
         logger.info("timing {} bucket(s) on {} GPU(s)", len(buckets), len(gpus))
 
         with (
-            RecordSink.open(self.directory / RECORDS) as sink,
+            RowSink.open(self.directory / RECORDS, Record) as records,
+            RowSink.open(self.directory / HEARTBEATS, Heartbeat) as heartbeats,
             Pool.start(timers, buckets) as pool,
         ):
 
-            pool.run(measurement := Measurement(sink=sink, buckets=len(buckets)))
+            measurement = Measurement(records=records, heartbeats=heartbeats, buckets=len(buckets))
+
+            pool.run(measurement)
 
         return measurement.drifts
 
@@ -858,13 +954,13 @@ class Runner(Struct):
         limits = Limits.resolve(self.sweep, devices[0].shared_memory)
         plan = Plan.initialize(self.sweep, limits)
 
-        # Only cases without a settled record are timed, and only their units compiled.
+        # A bucket with any unsettled case is timed again in full, so that every case of a bucket
+        # is timed by one process. Only the units of those buckets are compiled.
 
         settled = self.records.settled
-        remaining = (bucket.remaining(settled) for bucket in plan.buckets)
+        unsettled = [bucket for bucket in plan.buckets if not bucket.is_settled(settled)]
 
-        timed = filter(attrgetter("cases"), remaining)
-        buckets = sorted(timed, key=attrgetter("cost"), reverse=True)
+        buckets = sorted(unsettled, key=attrgetter("cost"), reverse=True)
 
         pending = {case.key for bucket in buckets for case in bucket.cases}
         compiled = [unit for unit in plan.units if unit.key in pending]
@@ -880,6 +976,7 @@ class Runner(Struct):
             timer,
             (options := self.options).tolerance,
             options.jobs,
+            options.heartbeat,
             devices,
             calibration,
         )
@@ -887,6 +984,14 @@ class Runner(Struct):
         manifest.save(self.directory / MANIFEST)
 
         drifts = self.measure(plan, gpus, buckets, timer)
+        drifted = methodcaller("exceeds", options.tolerance)
+
+        for drift in filter(drifted, drifts):
+
+            message = "GPU {} drifted {:+.3%}, beyond the {:.3%} tolerance"
+
+            logger.warning(message, drift.device, drift.change, options.tolerance)
+
         records = RecordLog.load(self.directory / RECORDS)
 
         completion = Completion.initialize(datetime.now(UTC), records, drifts)

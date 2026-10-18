@@ -44,6 +44,9 @@ REPLAYS: Final[Axis] = (5, 10)
 # The candidate repeat count of a calibration.
 REPEATS: Final[int] = 10
 
+# The repeats dropped at either end of a dispersion, so that one stray capture cannot decide it.
+TRIMMED: Final[int] = 1
+
 # The default tolerance on the relative range of a calibrated median.
 TOLERANCE: Final[float] = 0.005
 
@@ -94,7 +97,11 @@ class GraphTimer(Struct, frozen=True):
 
     Note(s):
 
-        • The eager calls load the probe's kernels, and the untimed replay settles the L2 cache.
+        • The eager calls load the probe's kernels, and an untimed replay before the timed ones
+          settles the L2 cache.
+
+        • A captured graph can be replayed for timing again and again, which separates changes
+          over time from differences between captures.
 
         • Calls run back to back, so with PDL each call's first stage launches under the tail of
           the previous call, as in a decode loop.
@@ -129,9 +136,9 @@ class GraphTimer(Struct, frozen=True):
             / self.unroll
         )
 
-    def sample(self, probe: Probe) -> list[float]:
+    def capture(self, probe: Probe) -> CUDAGraph:
         """
-        The latency per call of each timed replay, in microseconds.
+        The probe's calls, unrolled into one graph after the eager calls.
 
         """
         for _ in range(self.warmup):
@@ -144,6 +151,13 @@ class GraphTimer(Struct, frozen=True):
 
                 probe()
 
+        return graph
+
+    def replay(self, graph: CUDAGraph) -> list[float]:
+        """
+        The latency per call of each timed replay of the graph, in microseconds.
+
+        """
         graph.replay()
 
         # Consecutive replays share a boundary event, so the samples tile the timeline.
@@ -159,6 +173,13 @@ class GraphTimer(Struct, frozen=True):
         events[-1].synchronize()
 
         return [self.latency(start, end) for start, end in pairwise(events)]
+
+    def sample(self, probe: Probe) -> list[float]:
+        """
+        The latency per call of each timed replay of a fresh capture, in microseconds.
+
+        """
+        return self.replay(self.capture(probe))
 
     def measure(self, probe: Probe, index: int) -> IndexedRun:
 
@@ -193,12 +214,59 @@ class Series(Struct, frozen=True):
 
         return cls(unroll=unroll, probe=index, repeats=[r.latencies for r in runs])
 
-    def dispersion(self, replays: int) -> float:
+    @classmethod
+    def sample(
+        cls, probes: list[Probe], warmup: int, unrolls: Axis, replays: Axis, repeats: int
+    ) -> list[Series]:
         """
-        The relative range of the median across repeats, over each repeat's first replays.
+        The series of every probe at every unroll count, each capture timed at the largest
+        replay count.
 
         """
-        return relative_range([median(samples[:replays]) for samples in self.repeats])
+        if repeats <= 2 * TRIMMED:
+
+            raise ValueError(f"repeats must exceed {2 * TRIMMED}, got {repeats} instead")
+
+        else:
+
+            count = max(replays)
+            timers = [GraphTimer(warmup=warmup, unroll=u, replays=count) for u in unrolls]
+
+            # A first round takes the GPU out of idle, so it is timed but kept out of the series.
+
+            for timer, probe in product(timers, probes):
+
+                timer.sample(probe)
+
+            # Repeats run outermost, so slow drift spreads across every unroll count and probe.
+
+            schedule = product(range(repeats), timers, enumerate(probes))
+            runs = [timer.measure(probe, index) for _, timer, (index, probe) in schedule]
+
+            grouped = groupby(attrgetter("unroll", "index"), runs)
+
+            return list(map(cls.from_runs, grouped.values()))
+
+    def medians(self, replays: int) -> list[float]:
+        """
+        The median of each repeat over its first replays, fastest first.
+
+        """
+        return sorted(median(samples[:replays]) for samples in self.repeats)
+
+    def dispersion(self, replays: int) -> float:
+        """
+        The relative range of the median across repeats, without the fastest and slowest repeat.
+
+        """
+        return relative_range(self.medians(replays)[TRIMMED:-TRIMMED])
+
+    def spread(self, replays: int) -> float:
+        """
+        The relative range of the median across every repeat.
+
+        """
+        return relative_range(self.medians(replays))
 
 
 class Trial(Struct, frozen=True):
@@ -214,8 +282,20 @@ class Trial(Struct, frozen=True):
     # The timed replays per measurement.
     replays: int
 
-    # The worst relative range of the median across repeats, over every probe.
+    # The worst relative range of the median across repeats, over every probe, without the
+    # fastest and slowest repeat of each.
     dispersion: float
+
+    # The worst relative range of the median across every repeat, over every probe.
+    spread: float
+
+    @classmethod
+    def from_series(cls, series: list[Series], unroll: int, replays: int) -> Trial:
+
+        dispersion = max(s.dispersion(replays) for s in series)
+        spread = max(s.spread(replays) for s in series)
+
+        return cls(unroll=unroll, replays=replays, dispersion=dispersion, spread=spread)
 
     @property
     def cost(self) -> int:
@@ -240,6 +320,11 @@ class Calibration(Struct):
         • Replay counts are prefixes of one set of samples, so each unroll count is captured once
           per repeat and probe.
 
+        • The dispersion leaves out the fastest and slowest repeat of each probe, since a stray
+          capture shows at one unroll count or another whatever the count. The spread keeps them.
+
+        • A discarded round precedes the repeats, since the first captures after idle run fast.
+
         • When no pair is within tolerance, the most repeatable one is chosen instead.
 
     """
@@ -256,7 +341,7 @@ class Calibration(Struct):
         bands = groupby(attrgetter("unroll"), series)
 
         trials = (
-            Trial(unroll=unroll, replays=count, dispersion=max(s.dispersion(count) for s in band))
+            Trial.from_series(band, unroll, count)
             for (unroll, band), count in product(bands.items(), replays)
         )
 
@@ -273,16 +358,7 @@ class Calibration(Struct):
         repeats: int = REPEATS,
     ) -> Calibration:
 
-        count = max(replays)
-        timers = [GraphTimer(warmup=warmup, unroll=u, replays=count) for u in unrolls]
-
-        # Repeats run outermost, so slow drift spreads across every unroll count and probe.
-
-        schedule = product(range(repeats), timers, enumerate(probes))
-        runs = [timer.measure(probe, index) for _, timer, (index, probe) in schedule]
-
-        grouped = groupby(attrgetter("unroll", "index"), runs)
-        series = list(map(Series.from_runs, grouped.values()))
+        series = Series.sample(probes, warmup, unrolls, replays, repeats)
 
         return cls.initialize(series, replays, tolerance)
 

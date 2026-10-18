@@ -17,10 +17,10 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from csv import DictReader, DictWriter
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import partial
 from io import TextIOWrapper
 from operator import attrgetter
@@ -28,25 +28,29 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from cytoolz.dicttoolz import valmap
-from msgspec import Struct, convert, structs, toml
+from msgspec import Struct, convert, structs, to_builtins, toml
 
 from triton.compiler import CompiledKernel      # noqa.
 
 from sonic_sampler.benchmark.base import describe, nullify
-from sonic_sampler.benchmark.environment import Device
+from sonic_sampler.benchmark.environment import Device, Telemetry
 from sonic_sampler.benchmark.sweep import Case, Limits, Sweep
-from sonic_sampler.benchmark.timing import Calibration, GraphTimer, Timing
+from sonic_sampler.benchmark.timing import Calibration, GraphTimer, Series, Timing
 
 
 type Status = Literal["ok", "invalid", "failed"]
+
+type Phase = Literal["start", "beat", "end"]
 
 
 # The file names within a run directory.
 MANIFEST: Final[str] = "manifest.toml"
 RECORDS: Final[str] = "records.csv"
+HEARTBEATS: Final[str] = "heartbeats.csv"
+CALIBRATION: Final[str] = "calibration.csv"
 
 # The manifest format version.
-MANIFEST_VERSION: Final[int] = 1
+MANIFEST_VERSION: Final[int] = 2
 
 # Measurement field suffixes.
 MEASURES: Final[tuple[str, ...]] = ("_us", "_regs", "_spills")
@@ -58,6 +62,28 @@ def has_null_measures(record: Record) -> bool:
     predicates = (getattr(record, f) is None for f in fields if f.endswith(MEASURES))
 
     return any(predicates)
+
+
+def load_rows[T: Struct](path: Path, schema: type[T]) -> list[T]:
+    """
+    The rows of a CSV file written by a `RowSink`, with empty cells read as missing values.
+
+    """
+    with path.open(newline="") as handle:
+
+        rows = map(partial(valmap, nullify), DictReader(handle))
+
+        return [convert(row, type=schema, strict=False) for row in rows]
+
+
+def save_rows[T: Struct](path: Path, schema: type[T], rows: Iterable[T]) -> None:
+
+    with path.open("w", newline="") as handle:
+
+        writer = DictWriter(handle, fieldnames=schema.__struct_fields__)
+
+        writer.writeheader()
+        writer.writerows(map(to_builtins, rows))
 
 
 class Record(Case, frozen=True):
@@ -72,6 +98,9 @@ class Record(Case, frozen=True):
 
     # The NVML index of the GPU the case ran on.
     device: int
+
+    # The time the record was made, in UTC.
+    time: datetime
 
     # The median latency per call, in microseconds.
     median_us: float | None = None
@@ -106,7 +135,9 @@ class Record(Case, frozen=True):
     @classmethod
     def initialize(cls, case: Case, status: Status, device: int, **measures: Any) -> Record:
 
-        return cls(**structs.asdict(case), status=status, device=device, **measures)
+        time = datetime.now(UTC)
+
+        return cls(**structs.asdict(case), status=status, device=device, time=time, **measures)
 
     @classmethod
     def measured(
@@ -169,11 +200,7 @@ class RecordLog(list[Record]):
     @classmethod
     def load(cls, path: Path) -> RecordLog:
 
-        with path.open(newline="") as handle:
-
-            rows = map(partial(valmap, nullify), DictReader(handle))
-
-            return cls(convert(row, type=Record, strict=False) for row in rows)
+        return cls(load_rows(path, Record))
 
     @property
     def latest(self) -> dict[Case, Record]:
@@ -188,10 +215,14 @@ class RecordLog(list[Record]):
         return {case for case, record in self.latest.items() if record.is_viable}
 
 
-class RecordSink(Struct):
+class RowSink[T: Struct](Struct):
 
     """
-    Appends records to a run's records as they arrive, flushing every row.
+    Appends rows of one struct type to a CSV file as they arrive, flushing every row.
+
+    Note(s):
+
+        • Rows are written as builtins, so timestamps are ISO 8601 and missing values are empty.
 
     """
 
@@ -203,13 +234,13 @@ class RecordSink(Struct):
 
     @classmethod
     @contextmanager
-    def open(cls, path: Path) -> Iterator[RecordSink]:
+    def open(cls, path: Path, schema: type[T]) -> Iterator[RowSink[T]]:
 
         fresh = not (path.exists() and path.stat().st_size)
 
         with path.open("a", newline="") as handle:
 
-            writer = DictWriter(handle, fieldnames=Record.__struct_fields__)
+            writer = DictWriter(handle, fieldnames=schema.__struct_fields__)
 
             if fresh:
 
@@ -217,32 +248,108 @@ class RecordSink(Struct):
 
             yield cls(handle=handle, writer=writer)
 
-    def __call__(self, record: Record) -> None:
+    def __call__(self, row: T) -> None:
 
-        self.writer.writerow(structs.asdict(record))
+        self.writer.writerow(to_builtins(row))
         self.handle.flush()
 
 
-class Drift(Struct):
+class Sample(Case, frozen=True):
 
     """
-    The drift reference of one GPU: one fixed case, timed as the GPU started and finished timing.
+    One timed replay of a calibration probe, i.e. one row of the run's calibration samples.
+
+    """
+
+    # The calls per captured graph.
+    unroll: int
+
+    # The repeat the replay belongs to.
+    repeat: int
+
+    # The replay's position within its repeat.
+    replay: int
+
+    # The latency per call, in microseconds.
+    latency_us: float
+
+    @classmethod
+    def from_series(cls, series: Series, case: Case) -> list[Sample]:
+
+        fields = structs.asdict(case)
+
+        return [
+            cls(**fields, unroll=series.unroll, repeat=repeat, replay=replay, latency_us=latency)
+            for repeat, latencies in enumerate(series.repeats)
+            for replay, latency in enumerate(latencies)
+        ]
+
+
+class Heartbeat(Telemetry, kw_only=True):
+
+    """
+    One timing of a GPU's held reference graph, with the GPU's telemetry right after it, i.e. one
+    row of the run's heartbeats.
 
     """
 
     # The NVML index of the GPU.
     device: int
 
-    # The reference timing as the GPU started timing.
-    start: Timing
+    # When the beat fell: before the GPU's first bucket, between its cases, or after its last.
+    phase: Phase
 
-    # The reference timing as the GPU finished timing.
-    end: Timing
+    # The beat time, in UTC.
+    time: datetime
+
+    # The median latency per call of the reference, in microseconds.
+    median_us: float
+
+    # The 10th percentile latency per call of the reference, in microseconds.
+    p10_us: float
+
+    # The 90th percentile latency per call of the reference, in microseconds.
+    p90_us: float
+
+    @classmethod
+    def initialize(
+        cls, device: int, phase: Phase, timing: Timing, telemetry: Telemetry
+    ) -> Heartbeat:
+
+        return cls(
+            **structs.asdict(telemetry),
+            device=device,
+            phase=phase,
+            time=datetime.now(UTC),
+            **structs.asdict(timing),
+        )
+
+
+class Drift(Struct):
+
+    """
+    The drift of one GPU's held reference graph, from the first to the last heartbeat of the
+    process that captured it.
+
+    """
+
+    # The NVML index of the GPU.
+    device: int
+
+    # The heartbeat as the GPU started timing.
+    start: Heartbeat
+
+    # The heartbeat as the GPU finished timing.
+    end: Heartbeat
 
     @property
     def change(self) -> float:
 
         return (self.end.median_us / self.start.median_us) - 1
+
+    def exceeds(self, tolerance: float) -> bool:
+
+        return abs(self.change) > tolerance
 
 
 class Completion(Struct):
@@ -253,7 +360,7 @@ class Completion(Struct):
     # The case count per status, over every case's latest record.
     statuses: dict[Status, int]
 
-    # The drift reference of each GPU that timed cases.
+    # The drift of each GPU that timed cases.
     drifts: list[Drift]
 
     @classmethod
@@ -262,6 +369,17 @@ class Completion(Struct):
         statuses = Counter(map(attrgetter("status"), records.latest.values()))
 
         return cls(end=end, statuses=dict(sorted(statuses.items())), drifts=drifts)
+
+
+class Header(Struct):
+
+    """
+    The part of a manifest every format version shares.
+
+    """
+
+    # The manifest format version.
+    version: int
 
 
 class Manifest(Struct, omit_defaults=True):
@@ -293,6 +411,9 @@ class Manifest(Struct, omit_defaults=True):
     # The compile processes per GPU.
     compile_jobs: int
 
+    # The seconds between heartbeats while timing.
+    heartbeat: float
+
     # The GPU(s) the run measured on.
     devices: list[Device]
 
@@ -312,6 +433,7 @@ class Manifest(Struct, omit_defaults=True):
         timer: GraphTimer,
         tolerance: float,
         jobs: int,
+        heartbeat: float,
         devices: list[Device],
         calibration: Calibration | None = None,
     ) -> Manifest:
@@ -328,6 +450,7 @@ class Manifest(Struct, omit_defaults=True):
             timer=timer,
             tolerance=tolerance,
             compile_jobs=jobs,
+            heartbeat=heartbeat,
             devices=devices,
             calibration=calibration,
         )
@@ -335,7 +458,15 @@ class Manifest(Struct, omit_defaults=True):
     @classmethod
     def load(cls, path: Path) -> Manifest:
 
-        return toml.decode(path.read_bytes(), type=cls)
+        content = path.read_bytes()
+
+        if (version := toml.decode(content, type=Header).version) != MANIFEST_VERSION:
+
+            raise ValueError(f"{path} has manifest format {version}, not {MANIFEST_VERSION}")
+
+        else:
+
+            return toml.decode(content, type=cls)
 
     @property
     def tag(self) -> str:

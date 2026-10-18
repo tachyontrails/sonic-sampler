@@ -16,12 +16,12 @@
 
 from __future__ import annotations
 
-from itertools import chain, cycle, filterfalse, islice, product
+from itertools import chain, cycle, islice, product
 from operator import attrgetter
 from typing import Annotated, Final, get_type_hints
 
 from cytoolz.itertoolz import groupby, unique
-from msgspec import Struct, structs
+from msgspec import Struct
 from tyro.conf import arg
 
 from triton import cdiv     # noqa.
@@ -403,9 +403,9 @@ class Bucket(Struct):
 
         return [cases[len(cases) // 2] for cases in lanes.values()]
 
-    def remaining(self, settled: set[Case]) -> Bucket:
+    def is_settled(self, settled: set[Case]) -> bool:
 
-        return structs.replace(self, cases=list(filterfalse(settled.__contains__, self.cases)))
+        return all(map(settled.__contains__, self.cases))
 
 
 class Plan(Struct):
