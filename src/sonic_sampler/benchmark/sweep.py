@@ -16,12 +16,12 @@
 
 from __future__ import annotations
 
-from itertools import chain, cycle, islice, product
+from itertools import chain, cycle, filterfalse, islice, product
 from operator import attrgetter
 from typing import Annotated, Final, get_type_hints
 
 from cytoolz.itertoolz import groupby, unique
-from msgspec import Struct
+from msgspec import Struct, structs
 from tyro.conf import arg
 
 from triton import cdiv     # noqa.
@@ -264,6 +264,11 @@ class Case(Struct, frozen=True):
         return STRATEGIES[self.strategy]
 
     @property
+    def key(self) -> tuple[Group, Strategy]:
+
+        return self.group, self.strategy
+
+    @property
     def tuning(self) -> TwoStageWarpConfig:
 
         return TwoStageWarpConfig(first=self.first_warps, second=self.second_warps)
@@ -305,6 +310,11 @@ class CompileUnit(Struct):
         second = limits.second_warps(group.block_v)
 
         return cls(group=group, strategy=strategy, first_warps=first, second_warps=second)
+
+    @property
+    def key(self) -> tuple[Group, Strategy]:
+
+        return self.group, self.strategy
 
     @property
     def can_launch(self) -> bool:
@@ -376,6 +386,14 @@ class Bucket(Struct):
         return len(self.cases)
 
     @property
+    def cost(self) -> int:
+        """
+        A proxy for the bucket's timing cost: its case count times the logits each call reads.
+
+        """
+        return self.size * self.vocab_size * self.batch_size
+
+    @property
     def probes(self) -> list[Case]:
         """
         Each strategy's median case, i.e. a mid-range vocab block size and warp counts.
@@ -384,6 +402,10 @@ class Bucket(Struct):
         lanes = groupby(attrgetter("strategy"), self.cases)
 
         return [cases[len(cases) // 2] for cases in lanes.values()]
+
+    def remaining(self, settled: set[Case]) -> Bucket:
+
+        return structs.replace(self, cases=list(filterfalse(settled.__contains__, self.cases)))
 
 
 class Plan(Struct):
@@ -437,6 +459,16 @@ class Plan(Struct):
         return sum(map(attrgetter("kernels"), self.units))
 
     @property
+    def lightest(self) -> Bucket:
+
+        return min(self.buckets, key=attrgetter("vocab_size", "batch_size"))
+
+    @property
+    def heaviest(self) -> Bucket:
+
+        return max(self.buckets, key=attrgetter("vocab_size", "batch_size"))
+
+    @property
     def size(self) -> int:
 
         return sum(map(attrgetter("size"), self.buckets))
@@ -447,9 +479,16 @@ class Plan(Struct):
         The calibration case(s): each strategy's median case in the lightest and heaviest bucket.
 
         """
-        key = attrgetter("vocab_size", "batch_size")
-
-        smallest = min(self.buckets, key=key).probes
-        largest = max(self.buckets, key=key).probes
+        smallest = self.lightest.probes
+        largest = self.heaviest.probes
 
         return list(unique(chain(smallest, largest)))
+
+    @property
+    def reference(self) -> Case:
+        """
+        The drift reference case: the heaviest bucket's bitonic probe, whose long replays carry
+        the least capture noise.
+
+        """
+        return next(case for case in self.heaviest.probes if case.strategy == "bitonic")

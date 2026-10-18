@@ -299,7 +299,7 @@ class Calibration(Struct):
         return admissible or self.least_dispersed
 
     @property
-    def is_converged(self) -> bool:
+    def has_converged(self) -> bool:
 
         return self.admits(self.choice)
 
