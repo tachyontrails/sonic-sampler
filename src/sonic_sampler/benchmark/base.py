@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from hashlib import blake2b
 from itertools import chain
 from statistics import median
 from typing import Final
@@ -28,6 +29,12 @@ THREAD_REGISTERS: Final[int] = 255
 
 # The threads per warp.
 WARP_SIZE: Final[int] = 32
+
+# The bytes per derived seed, the width `torch.manual_seed` accepts.
+SEED_BYTES: Final[int] = 8
+
+# The longest error summary a record keeps.
+ERROR_LENGTH: Final[int] = 200
 
 
 def is_power_of_2(value: int) -> bool:
@@ -63,3 +70,21 @@ def nullify(value: str) -> str | None:
 def relative_range(values: Sequence[float]) -> float:
 
     return (max(values) - min(values)) / median(values)
+
+
+def derive_seed(*values: int) -> int:
+    """
+    A seed determined by the given integers alone, stable across processes and Python versions.
+
+    """
+    payload = b"".join(value.to_bytes(SEED_BYTES, "little", signed=True) for value in values)
+    digest = blake2b(payload, digest_size=SEED_BYTES).digest()
+
+    return int.from_bytes(digest, "little")
+
+
+def describe(error: BaseException) -> str:
+
+    summary = str(error).partition("\n")[0]
+
+    return f"{type(error).__name__}: {summary}"[:ERROR_LENGTH]
