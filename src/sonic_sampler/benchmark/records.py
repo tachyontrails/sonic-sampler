@@ -25,6 +25,7 @@ from functools import partial
 from io import TextIOWrapper
 from operator import attrgetter
 from pathlib import Path
+from statistics import median
 from typing import Any, Final, Literal
 
 from cytoolz.dicttoolz import valmap
@@ -33,7 +34,7 @@ from msgspec import Struct, convert, structs, to_builtins, toml
 
 from triton.compiler import CompiledKernel      # noqa.
 
-from sonic_sampler.benchmark.base import describe, nullify
+from sonic_sampler.benchmark.base import describe, nullify, relative_range
 from sonic_sampler.benchmark.environment import Device, Telemetry
 from sonic_sampler.benchmark.sweep import Case, Limits, Sweep
 from sonic_sampler.benchmark.timing import Calibration, GraphTimer, Series, Timing
@@ -51,7 +52,10 @@ HEARTBEATS: Final[str] = "heartbeats.csv"
 CALIBRATION: Final[str] = "calibration.csv"
 
 # The manifest format version.
-MANIFEST_VERSION: Final[int] = 2
+MANIFEST_VERSION: Final[int] = 3
+
+# The beats between cases, at each end of a timing process, whose median bounds its drift.
+WINDOW: Final[int] = 3
 
 # Measurement field suffixes.
 MEASURES: Final[tuple[str, ...]] = ("_us", "_regs", "_spills")
@@ -82,9 +86,17 @@ def since_start(heartbeats: list[Heartbeat]) -> list[Heartbeat]:
     The heartbeats of the latest timing process: from its start beat on.
 
     """
-    starts = [index for index, beat in enumerate(heartbeats) if beat.phase == "start"]
+    starts = [index for index, hb in enumerate(heartbeats) if hb.is_starting]
 
     return heartbeats[starts[-1]:] if starts else []
+
+
+def between_cases(heartbeats: list[Heartbeat]) -> list[float]:
+    """
+    The reference medians of the beats taken between cases, i.e. while a bucket was open.
+
+    """
+    return [hb.median_us for hb in heartbeats if hb.is_beating]
 
 
 def save_rows[T: Struct](path: Path, schema: type[T], rows: Iterable[T]) -> None:
@@ -335,12 +347,29 @@ class Heartbeat(Telemetry, kw_only=True):
             **structs.asdict(timing),
         )
 
+    @property
+    def is_starting(self) -> bool:
+
+        return self.phase == "start"
+
+    @property
+    def is_beating(self) -> bool:
+
+        return self.phase == "beat"
+
 
 class Drift(Struct):
 
     """
-    The drift of one GPU's held reference graph, from the first to the last heartbeat of the
-    process that captured it.
+    The drift of one GPU's held reference graph while its latest process timed cases: from the
+    median of its first beats between cases to the median of its latest.
+
+    Note(s):
+
+        • The start and end beats are taken with no bucket open, and the start beat times faster
+          than the beats between cases, so it marks the step into timing rather than drift.
+
+        • Each end takes the median of up to `WINDOW` beats, fewer when the two would overlap.
 
     """
 
@@ -350,27 +379,67 @@ class Drift(Struct):
     # The heartbeat as the GPU started timing.
     start: Heartbeat
 
-    # The heartbeat as the GPU finished timing.
+    # The latest heartbeat of the process, for its telemetry.
     end: Heartbeat
+
+    # The beat(s) taken between cases.
+    beats: int
+
+    # The median of the first beats between cases, in microseconds.
+    first_us: float
+
+    # The median of the latest beats between cases, in microseconds.
+    latest_us: float
+
+    # The relative range of the beats between cases.
+    spread: float
 
     @property
     def change(self) -> float:
 
-        return (self.end.median_us / self.start.median_us) - 1
+        return (self.latest_us / self.first_us) - 1
+
+    @property
+    def step(self) -> float:
+        """
+        The change from the start beat to the first beats between cases.
+
+        """
+        return (self.first_us / self.start.median_us) - 1
+
+    @classmethod
+    def from_series(cls, series: list[Heartbeat]) -> Drift | None:
+        """
+        The drift over one timing process's heartbeats, or none before two beats between cases.
+
+        """
+        medians = between_cases(series)
+
+        if window := min(WINDOW, len(medians) // 2):
+
+            start, end = series[0], series[-1]
+            first, latest = median(medians[:window]), median(medians[-window:])
+
+            return cls(
+                device=start.device,
+                start=start,
+                end=end,
+                beats=len(medians),
+                first_us=first,
+                latest_us=latest,
+                spread=relative_range(medians),
+            )
 
     @classmethod
     def from_heartbeats(cls, heartbeats: list[Heartbeat]) -> list[Drift]:
         """
-        Each GPU's drift so far, from its latest process's start beat to that process's last beat.
+        Each GPU's drift so far, over the beats of its latest timing process.
 
         """
-        series = groupby(attrgetter("device"), heartbeats)
-        latest = valmap(since_start, series)
+        latest = valmap(since_start, groupby(attrgetter("device"), heartbeats))
+        drifts = (cls.from_series(latest[device]) for device in sorted(latest))
 
-        return [
-            cls(device=device, start=beats[0], end=beats[-1])
-            for device, beats in sorted(latest.items()) if len(beats) > 1
-        ]
+        return list(filter(None, drifts))
 
     def exceeds(self, tolerance: float) -> bool:
 

@@ -74,24 +74,28 @@ MASK_BITS: Final[int] = 64
 MILLIWATTS: Final[int] = 1_000
 
 # The member of an NVML field value that holds each value type.
-MEMBERS: Final[dict[int, str]] = {
-    NVML_VALUE_TYPE_DOUBLE: "dVal",
-    NVML_VALUE_TYPE_UNSIGNED_INT: "uiVal",
-    NVML_VALUE_TYPE_UNSIGNED_LONG: "ulVal",
-    NVML_VALUE_TYPE_UNSIGNED_LONG_LONG: "ullVal",
-    NVML_VALUE_TYPE_SIGNED_LONG_LONG: "sllVal",
-    NVML_VALUE_TYPE_SIGNED_INT: "siVal",
-    NVML_VALUE_TYPE_UNSIGNED_SHORT: "usVal",
-}
+MEMBERS: Final[dict[int, str]] = (
+    {
+        NVML_VALUE_TYPE_DOUBLE: "dVal",
+        NVML_VALUE_TYPE_UNSIGNED_INT: "uiVal",
+        NVML_VALUE_TYPE_UNSIGNED_LONG: "ulVal",
+        NVML_VALUE_TYPE_UNSIGNED_LONG_LONG: "ullVal",
+        NVML_VALUE_TYPE_SIGNED_LONG_LONG: "sllVal",
+        NVML_VALUE_TYPE_SIGNED_INT: "siVal",
+        NVML_VALUE_TYPE_UNSIGNED_SHORT: "usVal",
+    }
+)
 
 # The NVML fields a telemetry reading takes, by the `Telemetry` field each one fills.
-FIELDS: Final[dict[str, int]] = {
-    "memory_temp": NVML_FI_DEV_MEMORY_TEMP,
-    "power_capping_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_SW_POWER_CAP,
-    "thermal_slowdown_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_SW_THERM_SLOWDOWN,
-    "hw_thermal_slowdown_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_HW_THERM_SLOWDOWN,
-    "power_braking_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_HW_POWER_BRAKE_SLOWDOWN,
-}
+FIELDS: Final[dict[str, int]] = (
+    {
+        "memory_temp": NVML_FI_DEV_MEMORY_TEMP,
+        "power_capping_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_SW_POWER_CAP,
+        "thermal_slowdown_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_SW_THERM_SLOWDOWN,
+        "hw_thermal_slowdown_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_HW_THERM_SLOWDOWN,
+        "power_braking_ns": NVML_FI_DEV_CLOCKS_EVENT_REASON_HW_POWER_BRAKE_SLOWDOWN,
+    }
+)
 
 
 @contextmanager

@@ -90,9 +90,35 @@ class NearTie(Struct):
         return (self.slower.median_us / self.faster.median_us) - 1
 
     @property
+    def is_within(self) -> bool:
+        """
+        Whether the margin lies within the dispersion.
+
+        """
+        return self.margin <= self.dispersion
+
+    @property
+    def has_overlap(self) -> bool:
+        """
+        Whether the latency spreads overlap.
+
+        """
+        return self.faster.tail_overlap(self.slower)
+
+    @property
     def is_close(self) -> bool:
 
-        return self.margin <= self.dispersion or self.faster.tail_overlap(self.slower)
+        return self.is_within or self.has_overlap
+
+    @property
+    def tests(self) -> list[str]:
+        """
+        The test(s) that find the pair close, by name.
+
+        """
+        named = (("margin", self.is_within), ("overlap", self.has_overlap))
+
+        return [name for name, passed in named if passed]
 
 
 class Finding(Struct):

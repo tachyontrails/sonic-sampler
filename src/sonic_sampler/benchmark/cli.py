@@ -27,7 +27,7 @@ from tyro.conf import OmitArgPrefixes, Positional, arg, subcommand
 from sonic_sampler.benchmark.display import ReductionView, RunView, TableView
 from sonic_sampler.benchmark.records import MANIFEST, RunDirectory
 from sonic_sampler.benchmark.reduction import Reduction
-from sonic_sampler.benchmark.runner import HEARTBEAT, Options, RunError, Runner
+from sonic_sampler.benchmark.runner import Options, RunError, Runner
 from sonic_sampler.benchmark.sweep import Sweep
 
 
@@ -97,7 +97,7 @@ class Resume(Struct):
 
     """
     Resumes a run with its own sweep, timer, and tolerance, timing every bucket it left
-    incomplete.
+    incomplete, or nothing once every bucket is settled.
 
     """
 
@@ -107,17 +107,18 @@ class Resume(Struct):
     # The NVML index(es) of the GPUs to run on, every GPU on the node when empty.
     gpus: Annotated[tuple[int, ...], arg(aliases=("-g",))] = ()
 
-    # The compile processes per GPU.
-    jobs: Annotated[int, arg(aliases=("-j",))] = 8
+    # The compile processes per GPU, the run's own unless given.
+    jobs: Annotated[int | None, arg(aliases=("-j",))] = None
 
-    # The seconds between heartbeats while timing.
-    heartbeat: float = HEARTBEAT
+    # The seconds between heartbeats while timing, the run's own unless given.
+    heartbeat: float | None = None
 
     def __call__(self, console: Console) -> None:
 
-        options = Options(gpus=self.gpus, jobs=self.jobs, heartbeat=self.heartbeat)
-
-        Runner.resume(self.directory, options).run()
+        (
+            Runner.resume(self.directory, self.gpus, self.jobs, self.heartbeat)
+            .run()
+        )
 
         console.print(RunView.load(self.directory))
 

@@ -20,7 +20,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from itertools import chain
+from itertools import chain, filterfalse
 from multiprocessing import get_context
 from multiprocessing.context import SpawnContext, SpawnProcess      # noqa.
 from multiprocessing.queues import Queue
@@ -46,6 +46,7 @@ from sonic_sampler.benchmark.records import (
     Record,
     RecordLog,
     RowSink,
+    RunDirectory,
     Sample,
     save_rows,
 )
@@ -611,23 +612,17 @@ class Measurement(Phase[Bucket]):
     # The record(s) of each worker's current bucket, by slot.
     attempts: dict[int, list[Record]] = field(default_factory=dict)
 
-    # The first heartbeat of each GPU's latest timing process.
-    starts: dict[int, Heartbeat] = field(default_factory=dict)
-
-    # The last heartbeat of each GPU's latest timing process.
-    ends: dict[int, Heartbeat] = field(default_factory=dict)
+    # The heartbeat(s) so far, in arrival order.
+    beats: list[Heartbeat] = field(default_factory=list)
 
     @property
     def drifts(self) -> list[Drift]:
+        """
+        Each GPU's drift over its latest timing process: a replacement process captures its own
+        reference graph, so its drift starts afresh.
 
-        matched = [
-            Drift(device=device, start=self.starts[device], end=self.ends[device])
-            for device in self.starts.keys() & self.ends.keys()
-        ]
-
-        matched.sort(key=attrgetter("device"))
-
-        return matched
+        """
+        return Drift.from_heartbeats(self.beats)
 
     def finish(self) -> None:
 
@@ -638,18 +633,7 @@ class Measurement(Phase[Bucket]):
     def beat(self, heartbeat: Heartbeat) -> None:
 
         self.heartbeats(heartbeat)
-
-        # A replacement process captures its own reference graph, so its drift starts afresh.
-
-        match heartbeat.phase:
-
-            case "start":
-
-                self.starts[heartbeat.device] = heartbeat
-
-            case "end":
-
-                self.ends[heartbeat.device] = heartbeat
+        self.beats.append(heartbeat)
 
     def blame(self, server: Server[Bucket], bucket: Bucket) -> Case | None:
         """
@@ -672,15 +656,11 @@ class Measurement(Phase[Bucket]):
         elif len(records) < len(cases):
 
             culprit, code = cases[len(records)], server.exit_code
-
             error = WorkerExited(f"worker on GPU {server.device} exited with code {code}")
+
             self.records(Record.failed(culprit, server.device, error))
 
             return culprit
-
-        else:
-
-            return None
 
     @override
     def observe(self, message: Message) -> None:
@@ -781,6 +761,9 @@ class Runner(Struct):
     # The record(s) of earlier attempts at the run.
     records: RecordLog
 
+    # The limits of the run being resumed, which keep its plan whatever GPUs resume it.
+    limits: Limits | None = None
+
     # The fixed timer: given explicitly, or reused from an earlier attempt.
     timer: GraphTimer | None = None
 
@@ -808,10 +791,16 @@ class Runner(Struct):
             )
 
     @classmethod
-    def resume(cls, directory: Path, options: Options) -> Runner:
+    def resume(
+        cls,
+        directory: Path,
+        gpus: tuple[int, ...] = (),
+        jobs: int | None = None,
+        heartbeat: float | None = None,
+    ) -> Runner:
         """
-        Resumes the run in the directory with its own sweep, timer, and tolerance: only the GPUs,
-        compile jobs, and heartbeat of the given options apply.
+        Resumes the run in the directory with its own sweep, limits, timer, tolerance, compile
+        jobs, and heartbeat: only the GPUs change, and the compile jobs or heartbeat when given.
 
         """
         if not (path := directory / MANIFEST).exists():
@@ -823,17 +812,44 @@ class Runner(Struct):
             manifest = Manifest.load(path)
             records = RecordLog.load(log) if (log := directory / RECORDS).exists() else RecordLog()
 
-            settings = dict(warmup=manifest.timer.warmup, tolerance=manifest.tolerance)
+            options = Options(
+                gpus=gpus,
+                jobs=manifest.compile_jobs if jobs is None else jobs,
+                warmup=manifest.timer.warmup,
+                tolerance=manifest.tolerance,
+                heartbeat=manifest.heartbeat if heartbeat is None else heartbeat,
+            )
 
             return cls(
                 directory=directory,
                 sweep=manifest.sweep,
-                options=structs.replace(options, **settings),
+                options=options,
                 start=manifest.start,
                 records=records,
+                limits=manifest.limits,
                 timer=manifest.timer,
                 calibration=manifest.calibration,
             )
+
+    @property
+    def has_settled(self) -> bool:
+        """
+        Whether the run being resumed has settled every bucket, so nothing is left to time.
+
+        """
+        limits = self.limits
+
+        return limits is not None and not self.unsettled(Plan.initialize(self.sweep, limits))
+
+    def unsettled(self, plan: Plan) -> list[Bucket]:
+        """
+        The buckets left to time, heaviest first: a bucket with any unsettled case is timed again
+        in full, so that every case of a bucket is timed by one process.
+
+        """
+        pending = filterfalse(methodcaller("is_settled", self.records.settled), plan.buckets)
+
+        return sorted(pending, key=attrgetter("cost"), reverse=True)
 
     def compilers(self, gpus: list[int], units: list[CompileUnit]) -> list[Placement]:
         """
@@ -945,27 +961,35 @@ class Runner(Struct):
         return measurement.drifts
 
     def run(self) -> Manifest:
+        """
+        Attempts the run, or concludes a resumed run with nothing left to time without starting
+        a single process.
 
+        """
         self.directory.mkdir(parents=True, exist_ok=True)
 
+        return self.conclude() if self.has_settled else self.attempt()
+
+    def attempt(self) -> Manifest:
+        """
+        One attempt at the run: it probes the GPUs, compiles while calibrating, then times every
+        bucket left.
+
+        """
         devices = self.probe()
         gpus = list(map(attrgetter("index"), devices))
 
-        limits = Limits.resolve(self.sweep, devices[0].shared_memory)
+        limits = self.limits or Limits.resolve(self.sweep, devices[0].shared_memory)
         plan = Plan.initialize(self.sweep, limits)
 
-        # A bucket with any unsettled case is timed again in full, so that every case of a bucket
-        # is timed by one process. Only the units of those buckets are compiled.
+        # Only the units of the buckets left are compiled.
 
-        settled = self.records.settled
-        unsettled = [bucket for bucket in plan.buckets if not bucket.is_settled(settled)]
-
-        buckets = sorted(unsettled, key=attrgetter("cost"), reverse=True)
-
+        buckets = self.unsettled(plan)
         pending = {case.key for bucket in buckets for case in bucket.cases}
-        compiled = [unit for unit in plan.units if unit.key in pending]
 
+        compiled = [unit for unit in plan.units if unit.key in pending]
         units = sorted(compiled, key=attrgetter("kernels"), reverse=True)
+
         timer, calibration = self.prepare(plan, gpus, units)
 
         manifest = Manifest.initialize(
@@ -983,14 +1007,40 @@ class Runner(Struct):
 
         manifest.save(self.directory / MANIFEST)
 
-        drifts = self.measure(plan, gpus, buckets, timer)
-        drifted = methodcaller("exceeds", options.tolerance)
+        return self.complete(manifest, self.measure(plan, gpus, buckets, timer))
+
+    def conclude(self) -> Manifest:
+        """
+        The manifest of a resumed run with every bucket settled: as it stands once finished, or
+        completed from the run's heartbeats when it stopped after its last record.
+
+        """
+        run = RunDirectory.load(self.directory)
+
+        if (manifest := run.manifest).has_finished:
+
+            logger.info("every bucket is settled, so nothing is left to time")
+
+            return manifest
+
+        else:
+
+            return self.complete(manifest, Drift.from_heartbeats(run.heartbeats))
+
+    def complete(self, manifest: Manifest, drifts: list[Drift]) -> Manifest:
+        """
+        Saves the manifest with the run's completion, warning of each GPU's drift beyond the
+        tolerance.
+
+        """
+        tolerance = self.options.tolerance
+        drifted = methodcaller("exceeds", tolerance)
 
         for drift in filter(drifted, drifts):
 
-            message = "GPU {} drifted {:+.3%}, beyond the {:.3%} tolerance"
+            message = "GPU {} drifted {:+.3%} between cases, beyond the {:.3%} tolerance"
 
-            logger.warning(message, drift.device, drift.change, options.tolerance)
+            logger.warning(message, drift.device, drift.change, tolerance)
 
         records = RecordLog.load(self.directory / RECORDS)
 

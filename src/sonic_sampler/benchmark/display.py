@@ -22,15 +22,13 @@ from operator import attrgetter
 from pathlib import Path
 from typing import Any, Final
 
-from cytoolz.itertoolz import groupby
 from msgspec import Struct
 from rich.box import SIMPLE_HEAD
 from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 
-from sonic_sampler.benchmark.base import relative_range
-from sonic_sampler.benchmark.records import Drift, RunDirectory, since_start
+from sonic_sampler.benchmark.records import Drift, RunDirectory
 from sonic_sampler.benchmark.reduction import Reduction
 from sonic_sampler.benchmark.sweep import Plan
 from sonic_sampler.interface.dispatch import DispatchSummary
@@ -64,12 +62,21 @@ def heading(*parts: str) -> Text:
     return Text(" · ".join(parts), style="bold")
 
 
-def tabulate(*columns: str, title: str | None = None) -> Table:
+def tabulate(*columns: str, title: str | None = None, caption: str | None = None) -> Table:
     """
-    A table in the one style of every view: a rule under the header, a left-aligned title.
+    A table in the one style of every view: a rule under the header, a left-aligned title and
+    caption.
 
     """
-    return Table(*columns, title=title, title_justify="left", box=SIMPLE_HEAD, pad_edge=False)
+    return Table(
+        *columns,
+        title=title,
+        caption=caption,
+        title_justify="left",
+        caption_justify="left",
+        box=SIMPLE_HEAD,
+        pad_edge=False,
+    )
 
 
 def bucket_rows(cells: Iterable[tuple[int, int, list[str]]], title: str | None = None) -> Table:
@@ -198,40 +205,45 @@ class RunView(Struct):
     @property
     def drift(self) -> Table:
         """
-        Each GPU's drift so far, over its latest timing process.
+        Each GPU's drift so far between cases, over its latest timing process, beside the step
+        from its start beat.
 
         """
         tolerance = self.run.manifest.tolerance
-        series = groupby(attrgetter("device"), self.run.heartbeats)
 
         table = tabulate(
             "GPU",
             "beats",
             "start",
+            "first",
             "latest",
+            "step",
             "drift",
             "spread",
             "SM clock",
             "GPU temp",
             "held back, power / thermal",
-            title="drift of the held reference, in µs, MHz, °C and ms",
+            title="drift of the held reference between cases, in µs, MHz, °C and ms",
+            caption="step: start beat to first beats · drift: first beats to latest beats",
         )
 
         for drift in Drift.from_heartbeats(self.run.heartbeats):
 
             start, end = drift.start, drift.end
-            beats = since_start(series[drift.device])
+            style = "red" if drift.exceeds(tolerance) else ""
 
             capping = held_back(start.power_capping_ns, end.power_capping_ns)
             thermal = held_back(start.thermal_slowdown_ns, end.thermal_slowdown_ns)
 
             table.add_row(
                 str(drift.device),
-                str(len(beats)),
+                str(drift.beats),
                 f"{start.median_us:.2f}",
-                f"{end.median_us:.2f}",
-                Text(f"{drift.change:+.3%}", style="red" if drift.exceeds(tolerance) else ""),
-                f"{relative_range([beat.median_us for beat in beats]):.3%}",
+                f"{drift.first_us:.2f}",
+                f"{drift.latest_us:.2f}",
+                f"{drift.step:+.3%}",
+                Text(f"{drift.change:+.3%}", style=style),
+                f"{drift.spread:.3%}",
                 f"{start.sm_clock} -> {end.sm_clock}",
                 f"{start.gpu_temp} -> {end.gpu_temp}",
                 f"{capping} / {thermal}",
@@ -276,7 +288,7 @@ class ReductionView(Struct):
 
         if ties := self.reduction.near_ties:
 
-            columns = ("V", "B", "faster", "slower", "margin", "dispersion")
+            columns = ("V", "B", "faster", "slower", "margin", "dispersion", "close by")
             table = tabulate(*columns, title="near-ties")
 
             for tie in ties:
@@ -284,7 +296,7 @@ class ReductionView(Struct):
                 faster, slower = tie.faster, tie.slower
                 sizes = (str(faster.vocab_size), str(faster.batch_size))
 
-                margins = (f"{tie.margin:.3%}", f"{tie.dispersion:.3%}")
+                margins = (f"{tie.margin:.3%}", f"{tie.dispersion:.3%}", ", ".join(tie.tests))
 
                 table.add_row(*sizes, label(faster), label(slower), *margins, style="yellow")
 
