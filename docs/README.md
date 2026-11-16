@@ -10,6 +10,7 @@ see the top-level [`README.md`](../README.md) and the paper.
 | [`slot-based.md`](slot-based.md) | Full integration for engines with a persistent slot per request |
 | [`just-in-time.md`](just-in-time.md) | Full integration for engines that compose the batch per iteration |
 | [`reference.md`](reference.md) | Signatures, shapes, dtypes, constants, and indicator bits |
+| [`benchmark.md`](benchmark.md) | Re-tuning the dispatch tables for a device, top-$`k`$ bound, or size range |
 
 Start with `concepts.md`, then `quickstart.md`. From there the path forks on how your engine holds
 per-request sampling state:
@@ -21,3 +22,6 @@ per-request sampling state:
 
 Each of those covers admission, per-iteration upkeep, the speculative decoding loop, and CUDA graph
 capture for that strategy in full, so only one of them needs reading.
+
+**N.B.:** [`benchmark.md`](benchmark.md) stands apart as it is needed only to produce a dispatch table the
+package does not ship.

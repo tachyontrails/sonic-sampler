@@ -11,7 +11,8 @@ uv pip install sonic-sampler
 ```
 
 Requires Python 3.12+, Triton 3.5.1, and an SM90+ device. The tuned dispatch tables shipped under
-`resources/dispatch` cover those architectures.
+`resources/dispatch` cover those architectures, and [`benchmark.md`](benchmark.md) covers tuning
+new ones.
 
 ## The adoption ladder
 

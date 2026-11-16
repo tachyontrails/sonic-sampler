@@ -81,6 +81,8 @@ values, indices = topk(logits)
 uv pip install sonic-sampler
 ```
 
+The `bench` extra, `sonic-sampler[bench]`, adds the `sonic-sampler bench` commands that re-tune the dispatch tables; see [`docs/benchmark.md`](docs/benchmark.md).
+
 ## :fire: Features
 
 - Logit Processors:
