@@ -121,7 +121,7 @@ class Resume(Struct):
     # The compile processes per GPU, the run's own unless given.
     jobs: Annotated[int | None, arg(aliases=("-j",))] = None
 
-    # The seconds between heartbeats while timing, the run's own unless given.
+    # The seconds between heartbeats while timing at least, the run's own unless given.
     heartbeat: float | None = None
 
     def __call__(self, console: Console) -> None:

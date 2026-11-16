@@ -49,6 +49,10 @@ SOAK_SECONDS: Final[float] = 5.0
 # below the drift tolerance.
 BEAT_REPLAYS: Final[int] = 20
 
+# The share of a timing process's time its heartbeats take at most: a costly reference spaces its
+# beats further apart than the interval given.
+BEAT_SHARE: Final[float] = 0.05
+
 
 class Message(Struct):
 
@@ -226,6 +230,9 @@ class Reference(Struct):
 
         • A heartbeat times at least `BEAT_REPLAYS` replays, whatever the replays of a case.
 
+        • Beats are spaced by the interval given, or further apart when a beat costs more than
+          `BEAT_SHARE` of the time from one to the next.
+
     """
 
     # The NVML index of the process's GPU.
@@ -240,11 +247,14 @@ class Reference(Struct):
     # The timer that captured the graph and times its replays.
     timer: GraphTimer
 
-    # The seconds between heartbeats.
+    # The seconds between heartbeats at least.
     interval: float
 
     # The monotonic time of the last heartbeat.
     last: float = 0.0
+
+    # The seconds the last heartbeat took.
+    cost: float = 0.0
 
     @classmethod
     def capture(
@@ -272,9 +282,18 @@ class Reference(Struct):
             torch.cuda.synchronize()
 
     @property
+    def spacing(self) -> float:
+        """
+        The seconds from the end of one heartbeat to the next: the interval, or long enough that
+        a beat of the last one's cost takes `BEAT_SHARE` of the time.
+
+        """
+        return max(self.interval, self.cost * (1 - BEAT_SHARE) / BEAT_SHARE)
+
+    @property
     def is_due(self) -> bool:
 
-        return (monotonic() - self.last) >= self.interval
+        return (monotonic() - self.last) >= self.spacing
 
     def beat(self, phase: Phase) -> Heartbeat:
         """
@@ -282,10 +301,13 @@ class Reference(Struct):
         previous beat.
 
         """
+        start = monotonic()
+
         timing = Timing.initialize(self.timer.replay(self.graph))
         telemetry = Telemetry.probe(self.device)
 
         self.last = monotonic()
+        self.cost = self.last - start
 
         return Heartbeat.initialize(self.device, phase, timing, telemetry)
 

@@ -85,7 +85,7 @@ FLUSH_SECONDS: Final[float] = 0.1
 # The consecutive restarts a server may take without its worker taking up a task.
 MAX_RESTARTS: Final[int] = 3
 
-# The default seconds between heartbeats while timing.
+# The default seconds between heartbeats while timing, at least.
 HEARTBEAT: Final[float] = 5.0
 
 
@@ -176,7 +176,7 @@ class Options(Struct):
     # The tolerance on calibrated dispersion and on drift.
     tolerance: float = TOLERANCE
 
-    # The seconds between heartbeats while timing.
+    # The seconds between heartbeats while timing, at least.
     heartbeat: float = HEARTBEAT
 
     def __post_init__(self) -> None:

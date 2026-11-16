@@ -75,7 +75,7 @@ and 84 buckets of 18,200 cases.
 | `--warmup` | $3$ | The eager calls before each capture |
 | `--unroll`, `--replays` | calibrated | Fix the timer, which skips calibration |
 | `--tolerance` | $0.005$ | The tolerance on calibrated dispersion and on drift |
-| `--heartbeat` | $5.0$ | The seconds between heartbeats while timing |
+| `--heartbeat` | $5.0$ | The seconds between heartbeats while timing, at least |
 
 Vocab blocks are bounded before anything compiles. Two limits set an exact ceiling: the 16-bit
 index of a packed key, and the second stage's staging buffer of $4 \cdot \hat{Z}_v \cdot k$ bytes
@@ -126,7 +126,8 @@ replayed for every heartbeat, so its timings differ only by when they were taken
 replays it for 5 s to load the GPU, takes a start beat, then a beat between cases every heartbeat
 interval, and an end beat after its last bucket. A beat times at least 20 replays and reads the
 GPU's telemetry: SM clock, temperatures, power, energy, and the time held back by power and thermal
-limits.
+limits. When beats are costly, as with the default sweep's reference at about 2 s a beat, they are
+spaced further apart than the interval, so that they take at most 5% of the process's time.
 
 - **Drift** runs from the median of the first three beats between cases to the median of the
   latest three, or of fewer when a process has fewer than six. Drift beyond the tolerance is logged
