@@ -16,8 +16,11 @@
 
 from __future__ import annotations
 
+import sys
+
 from collections.abc import Iterator, Sequence
 from hashlib import blake2b
+from importlib.util import find_spec
 from itertools import chain
 from statistics import median
 from typing import Final
@@ -35,6 +38,12 @@ SEED_BYTES: Final[int] = 8
 
 # The longest error summary a record keeps.
 ERROR_LENGTH: Final[int] = 200
+
+# The modules of the `bench` extra, which every bench command imports.
+EXTRA: Final[tuple[str, ...]] = ("rich", "loguru", "pynvml")
+
+# The command that installs the `bench` extra.
+INSTALL: Final[str] = 'uv pip install "sonic-sampler[bench]"'
 
 
 def is_power_of_2(value: int) -> bool:
@@ -88,3 +97,14 @@ def describe(error: BaseException) -> str:
     summary = str(error).partition("\n")[0]
 
     return f"{type(error).__name__}: {summary}"[:ERROR_LENGTH]
+
+
+def require_extra() -> None:
+    """
+    Exits with a one-line message, rather than an import error, when a module of the `bench`
+    extra is missing.
+
+    """
+    if missing := [name for name in EXTRA if find_spec(name) is None]:
+
+        sys.exit(f"error: the bench extra is missing ({', '.join(missing)}): {INSTALL}")

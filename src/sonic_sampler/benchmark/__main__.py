@@ -18,12 +18,17 @@ import sys
 
 import tyro
 
-from sonic_sampler.benchmark.cli import Bench, execute
+from sonic_sampler.benchmark.base import require_extra
 
 
 # Worker processes start by `spawn`, which imports this module again, so the command runs only
-# in the parent.
+# in the parent. The commands import the extra, so they are imported once it is known to be
+# installed.
 
 if __name__ == "__main__":
+
+    require_extra()
+
+    from sonic_sampler.benchmark.cli import Bench, execute
 
     sys.exit(execute(tyro.cli(Bench, prog="python -m sonic_sampler.benchmark")))

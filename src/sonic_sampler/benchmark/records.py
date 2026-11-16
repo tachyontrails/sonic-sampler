@@ -465,6 +465,14 @@ class Completion(Struct):
         return cls(end=end, statuses=dict(sorted(statuses.items())), drifts=drifts)
 
 
+class FormatMismatch(ValueError):
+
+    """
+    Raised when a manifest holds a format other than the one this version reads.
+
+    """
+
+
 class Header(Struct):
 
     """
@@ -556,7 +564,7 @@ class Manifest(Struct, omit_defaults=True):
 
         if (version := toml.decode(content, type=Header).version) != MANIFEST_VERSION:
 
-            raise ValueError(f"{path} has manifest format {version}, not {MANIFEST_VERSION}")
+            raise FormatMismatch(f"{path} has manifest format {version}, not {MANIFEST_VERSION}")
 
         else:
 

@@ -25,7 +25,7 @@ from rich.text import Text
 from tyro.conf import OmitArgPrefixes, Positional, arg, subcommand
 
 from sonic_sampler.benchmark.display import ReductionView, RunView, TableView
-from sonic_sampler.benchmark.records import MANIFEST, RunDirectory
+from sonic_sampler.benchmark.records import MANIFEST, FormatMismatch, RunDirectory
 from sonic_sampler.benchmark.reduction import Reduction
 from sonic_sampler.benchmark.runner import Options, RunError, Runner
 from sonic_sampler.benchmark.sweep import Sweep
@@ -57,6 +57,17 @@ def load_runs(paths: tuple[Path, ...]) -> list[RunDirectory]:
     else:
 
         return list(map(RunDirectory.load, paths))
+
+
+def load_table(path: Path) -> TableView:
+
+    if not path.exists():
+
+        raise CommandError(f"no dispatch table at {path}")
+
+    else:
+
+        return TableView.load(path)
 
 
 def reduce_runs(runs: list[RunDirectory]) -> Reduction:
@@ -191,7 +202,7 @@ class Show(Struct):
 
         if self.table is not None:
 
-            console.print(TableView.load(self.table))
+            console.print(load_table(self.table))
 
 
 type Bench = (
@@ -204,7 +215,8 @@ type Bench = (
 
 def execute(command: Run | Resume | Reduce | Show) -> int:
     """
-    Runs a bench command, reporting a run or command error as a message and exit code 1.
+    Runs a bench command, reporting a command, run, or manifest format error as a message and
+    exit code 1.
 
     """
     console = Console()
@@ -213,7 +225,7 @@ def execute(command: Run | Resume | Reduce | Show) -> int:
 
         command(console)
 
-    except (CommandError, RunError) as error:
+    except (CommandError, FormatMismatch, RunError) as error:
 
         console.print(Text.assemble(("error: ", "bold red"), str(error)))
 

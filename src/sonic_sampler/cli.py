@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import tyro
 
-from sonic_sampler.benchmark.cli import Bench, execute
+from sonic_sampler.benchmark.base import require_extra
 
 
 def main() -> int:
@@ -26,6 +26,12 @@ def main() -> int:
     The `sonic-sampler` entry point, with one command group per tool.
 
     """
+    require_extra()
+
+    # The commands import the extra, so they are imported once it is known to be installed.
+
+    from sonic_sampler.benchmark.cli import Bench, execute
+
     command = tyro.extras.subcommand_cli_from_dict(dict(bench=Bench), prog="sonic-sampler")
 
     return execute(command)
